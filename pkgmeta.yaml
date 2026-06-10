@@ -1,0 +1,20 @@
+package-as: BetterDeathRecap
+manual-changelog: CHANGELOG.md
+
+# ⚠ Keep this list in sync with the EXCLUDES array in package.sh
+ignore:
+  - .git/
+  - .github/
+  - .idea/
+  - docs/
+  - dist/
+  - CLAUDE.md
+  - PLAN.md
+  - .editorconfig
+  - .gitattributes
+  - .gitignore
+  - .luacheckrc
+  - Makefile
+  - package.sh
+  - "*.zip"
+  - "*.tar.gz"

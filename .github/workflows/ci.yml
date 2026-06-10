@@ -1,0 +1,97 @@
+# .github/workflows/ci.yml
+#
+# BetterDeathRecap — Continuous Integration
+# ============================================================
+# Runs on every push to main/develop and on all pull requests.
+# Does NOT run on version tags (those go to release.yml).
+#
+# Steps:
+#   1. Luacheck — lint all Lua source files in src/
+#   2. TOC version format check — ensure ## Version: is valid semver
+#   3. Interface version sanity — ensure ## Interface: is a 6-digit number
+# ============================================================
+
+name: CI
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    tags-ignore:
+      - '[0-9]*'   # release.yml handles tags
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  lint:
+    name: Lint & validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # ── Step: Install luacheck ────────────────────────────────────────────
+      - name: Install luacheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lua5.1 luarocks
+          sudo luarocks install luacheck
+
+      # ── Step: Run luacheck on all source files ────────────────────────────
+      # All globals, ignore rules, and per-file overrides are defined in
+      # .luacheckrc — the single source of truth. No flags needed here.
+      - name: Luacheck
+        run: luacheck src/
+
+      # ── Step: Validate ## Version: is semver ─────────────────────────────
+      - name: Validate .toc version
+        run: |
+          TOC="BetterDeathRecap.toc"
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$'
+
+          # awk extracts the third whitespace-delimited field from the matching
+          # line: "## Version: 1.2.3" → field 1="##" 2="Version:" 3="1.2.3"
+          VERSION=$(grep -E '^##[[:space:]]+Version:' "$TOC" | awk '{print $3}')
+
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::Could not find '## Version:' in $TOC."
+            exit 1
+          fi
+
+          if [[ ! "$VERSION" =~ $SEMVER_RE ]]; then
+            echo "::error::## Version: '$VERSION' in $TOC is not valid semver."
+            echo "::error::Expected format: MAJOR.MINOR.PATCH  (e.g. 1.2.3 or 2.0.0-beta.1)"
+            exit 1
+          fi
+
+          echo "✅ ## Version: $VERSION is valid semver."
+
+      # ── Step: Validate ## Interface: is a valid 6-digit WoW build number ──
+      - name: Validate .toc interface version
+        run: |
+          TOC="BetterDeathRecap.toc"
+          IFACE_RAW=$(grep -E '^##[[:space:]]+Interface:' "$TOC" | sed 's/^##[[:space:]]*Interface:[[:space:]]*//')
+
+          if [[ -z "$IFACE_RAW" ]]; then
+            echo "::error::Could not find '## Interface:' in $TOC."
+            exit 1
+          fi
+
+          IFS=',' read -ra IFACE_LIST <<< "$IFACE_RAW"
+          for IFACE in "${IFACE_LIST[@]}"; do
+            IFACE="${IFACE// /}"
+            if [[ ! "$IFACE" =~ ^[1-9][0-9]{5}$ ]]; then
+              echo "::error::## Interface: '$IFACE' does not look like a valid WoW interface version."
+              echo "::error::Expected one or more comma-separated 6-digit numbers, e.g. 120000 or 110107, 120000."
+              exit 1
+            fi
+          done
+
+          echo "✅ ## Interface: $IFACE_RAW is valid."

@@ -1,0 +1,2 @@
+# Shell scripts must stay LF so they run under Git Bash / sh (CRLF breaks them).
+*.sh text eol=lf

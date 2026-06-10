@@ -1,0 +1,203 @@
+# .github/workflows/release.yml
+#
+# BetterDeathRecap — Release Pipeline
+# ============================================================
+# Triggers on any tag that matches strict semantic versioning:
+#
+#   <MAJOR>.<MINOR>.<PATCH>                 →  stable release
+#   <MAJOR>.<MINOR>.<PATCH>-alpha.<N>       →  pre-release
+#   <MAJOR>.<MINOR>.<PATCH>-beta.<N>        →  pre-release
+#   <MAJOR>.<MINOR>.<PATCH>-rc.<N>          →  pre-release
+#
+# The workflow will:
+#   1. Validate the tag against the regex
+#   2. Verify the tag version matches ## Version: in BetterDeathRecap.toc
+#   3. Package the addon into <version>.zip (via package.sh)
+#   4. Create a GitHub Release (pre-release flag set for alpha/beta/rc)
+#   5. Upload the zip as a release asset
+# ============================================================
+
+name: Release
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  push:
+    tags:
+      # GitHub's tag filter uses glob syntax — matches bare semver tags.
+      # Fine-grained semver validation is done in the validate job below.
+      - '[0-9]*'
+
+permissions:
+  contents: write   # needed to create releases and upload assets
+
+# ============================================================
+# Job 1 — Validate tag
+# ============================================================
+jobs:
+  validate:
+    name: Validate semver tag
+    runs-on: ubuntu-latest
+
+    outputs:
+      version:    ${{ steps.parse.outputs.version }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Check tag format
+        id: parse
+        run: |
+          TAG="${{ github.ref_name }}"
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$'
+
+          if [[ ! "$TAG" =~ $SEMVER_RE ]]; then
+            echo "::error::Tag '$TAG' does not match the required semver format."
+            echo "::error::Expected: <MAJOR>.<MINOR>.<PATCH> or <MAJOR>.<MINOR>.<PATCH>-(alpha|beta|rc).<N>"
+            echo "::error::Examples: 1.2.3  2.0.0-alpha.1  1.0.0-rc.2"
+            exit 1
+          fi
+
+          VERSION="$TAG"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          if [[ "$TAG" =~ -(alpha|beta|rc)\. ]]; then
+            echo "prerelease=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "✅ Tag '$TAG' is valid semver."
+
+      - name: Verify .toc version matches tag
+        run: |
+          TAG_VERSION="${{ steps.parse.outputs.version }}"
+          TOC_FILE="BetterDeathRecap.toc"
+
+          if [[ ! -f "$TOC_FILE" ]]; then
+            echo "::error::$TOC_FILE not found in repository root."
+            exit 1
+          fi
+
+          TOC_VERSION=$(grep -E '^##[[:space:]]+Version:' "$TOC_FILE" | awk '{print $3}')
+
+          if [[ -z "$TOC_VERSION" ]]; then
+            echo "::error::Could not find '## Version:' in $TOC_FILE."
+            exit 1
+          fi
+
+          if [[ "$TOC_VERSION" != "$TAG_VERSION" ]]; then
+            echo "::error::Version mismatch!"
+            echo "::error::  Git tag  : $TAG_VERSION"
+            echo "::error::  $TOC_FILE: $TOC_VERSION"
+            echo "::error::Update '## Version:' in $TOC_FILE before tagging."
+            exit 1
+          fi
+
+          echo "✅ Version '$TAG_VERSION' matches $TOC_FILE."
+
+  # ============================================================
+  # Job 2 — Package
+  # ============================================================
+  package:
+    name: Package addon
+    needs: validate
+    runs-on: ubuntu-latest
+
+    outputs:
+      zip_name: ${{ steps.zip.outputs.zip_name }}
+      zip_path: ${{ steps.zip.outputs.zip_path }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Delegates entirely to package.sh — the single source of truth for
+      # what gets included/excluded and how the zip is structured.
+      - name: Build zip
+        id: zip
+        run: |
+          chmod +x package.sh
+          ./package.sh
+
+          VERSION="${{ needs.validate.outputs.version }}"
+          ZIP_NAME="${VERSION}.zip"
+          ZIP_PATH="dist/${ZIP_NAME}"
+
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "zip_path=$ZIP_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: addon-zip
+          path: ${{ steps.zip.outputs.zip_path }}
+          retention-days: 1
+          if-no-files-found: error
+
+  # ============================================================
+  # Job 3 — Release
+  # ============================================================
+  release:
+    name: Create GitHub Release
+    needs: [validate, package]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # needed for changelog generation
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: addon-zip
+          path: dist/
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          CURRENT_TAG="${{ github.ref_name }}"
+
+          PREV_TAG=$(git tag --sort=-version:refname \
+                     | grep -E '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' \
+                     | grep -v "^${CURRENT_TAG}$" \
+                     | head -n 1 || true)
+
+          if [[ -n "$PREV_TAG" ]]; then
+            echo "📝 Changes since $PREV_TAG:"
+            CHANGELOG=$(git log "${PREV_TAG}..HEAD" \
+                          --pretty=format:"- %s (%h)" \
+                          --no-merges)
+          else
+            echo "📝 No previous tag found — first release."
+            CHANGELOG="Initial release."
+          fi
+
+          {
+            echo "## What's Changed"
+            echo ""
+            echo "$CHANGELOG"
+            echo ""
+            echo "---"
+            echo "**Full diff:** https://github.com/${{ github.repository }}/compare/${PREV_TAG:-HEAD}...${CURRENT_TAG}"
+          } > RELEASE_NOTES.md
+
+          cat RELEASE_NOTES.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:   ${{ github.ref_name }}
+          name:       BetterDeathRecap ${{ github.ref_name }}
+          body_path:  RELEASE_NOTES.md
+          prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
+          draft:      false
+          files:      dist/${{ needs.package.outputs.zip_name }}
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

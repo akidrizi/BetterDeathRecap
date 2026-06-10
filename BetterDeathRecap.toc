@@ -1,0 +1,15 @@
+## Interface: 120000
+## Title: BetterDeathRecap
+## Author: Akis Idrizi
+## IconTexture: Interface\Addons\BetterDeathRecap\media\icon
+## Notes: A clean, readable replacement for Blizzard's death recap.
+## Version: 0.1.0
+## SavedVariables: BetterDeathRecapDB
+## Category: Combat
+
+src\Constants.lua
+src\HealthTracker.lua
+src\Analyzer.lua
+src\Display.lua
+src\Commands.lua
+src\Core.lua

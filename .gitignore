@@ -1,0 +1,125 @@
+# ============================================================
+# BetterDeathRecap — .gitignore
+# WoW Addon / Lua project
+# ============================================================
+
+# ------------------------------------------------------------
+# WoW SavedVariables (generated at runtime, never commit)
+# ------------------------------------------------------------
+*.lua.bak
+SavedVariables/
+WTF/
+
+# ------------------------------------------------------------
+# Build & packaging output
+# ------------------------------------------------------------
+dist/
+build/
+*.zip
+*.tar.gz
+*.tar.bz2
+
+# ------------------------------------------------------------
+# Lua tooling
+# ------------------------------------------------------------
+# LuaRocks local tree
+lua_modules/
+.luarocks/
+
+# Luacheck cache
+.luacheck_cache
+
+# lua-language-server / sumneko diagnostics cache
+.luarc.json.bak
+
+# ------------------------------------------------------------
+# Editor & IDE
+# ------------------------------------------------------------
+# VSCode
+.vscode/
+!.vscode/extensions.json   # keep shared extension recommendations
+
+# IntelliJ / Rider
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Vim / Neovim
+*.swp
+*.swo
+*~
+Session.vim
+.netrwhist
+
+# Emacs
+\#*\#
+.\#*
+*.elc
+auto-save-list
+tramp
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# ------------------------------------------------------------
+# OS artefacts
+# ------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encdata
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+*~
+
+# ------------------------------------------------------------
+# Node / tooling (packaging scripts, release automation)
+# ------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.yarn/
+package-lock.json
+yarn.lock
+.npmrc
+
+# ------------------------------------------------------------
+# Python tooling (e.g. BigWigs Packager helper scripts)
+# ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.env
+
+# ------------------------------------------------------------
+# CI / secrets
+# ------------------------------------------------------------
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# ------------------------------------------------------------
+# Misc
+# ------------------------------------------------------------
+*.log
+*.tmp
+*.bak
+*.orig
