@@ -3,7 +3,7 @@
 ## Author: Akis Idrizi
 ## IconTexture: Interface\Addons\BetterDeathRecap\media\icon
 ## Notes: A clean, readable replacement for Blizzard's death recap.
-## Version: 0.2.0
+## Version: 0.3.0
 ## SavedVariables: BetterDeathRecapDB
 ## Category: Combat
 
