@@ -1,4 +1,4 @@
-## Interface: 120005
+## Interface: 120005, 120007
 ## Title: BetterDeathRecap
 ## Author: Akis Idrizi
 ## IconTexture: Interface\Addons\BetterDeathRecap\media\icon
