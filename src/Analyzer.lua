@@ -11,103 +11,339 @@ BDR.Analyzer = Analyzer
 
 -- ── Helpers ─────────────────────────────────────────────────────────────────
 
--- Resolve a human label for an event's source. Real attackers carry a name;
--- environmental deaths have a nil source and a sentinel (negative) spellID.
-local function ResolveSource(combatantName, spellID)
-    if combatantName and combatantName ~= "" then
-        return combatantName
+-- Map an ENVIRONMENTAL_DAMAGE event to a localized label (Falling, Fire, …).
+-- CLEU exposes the kind as a string token (e.g. "Falling"); we key it to ENV_*.
+local function ResolveEnvironment(ev)
+    local kind = ev.environmentalType or ev.environmentType
+    if type(kind) == "string" and kind ~= "" then
+        local key = "ENV_" .. kind:upper()
+        return BDR.L[key] or kind
     end
-    if spellID and BDR.ENVIRONMENT[spellID] then
-        return BDR.ENVIRONMENT[spellID]
-    end
-    return BDR.ENVIRONMENT_FALLBACK
+    return BDR.L.ENV_UNKNOWN
 end
 
--- Pull every event out of every combatant into one flat, source-tagged list.
--- Returns the list (unsorted) or an empty table if the API exposes nothing.
-local function GatherEvents()
-    local out = {}
-    if not (C_DeathRecap and C_DeathRecap.GetCombatants and C_DeathRecap.GetEvents) then
-        return out
+-- Resolve a spell's display name from its ID (recap events carry only the ID).
+local function SpellName(spellID)
+    if not spellID then return nil end
+    if C_Spell and C_Spell.GetSpellName then
+        return C_Spell.GetSpellName(spellID)
     end
+    if GetSpellInfo then
+        return (GetSpellInfo(spellID))
+    end
+    return nil
+end
 
-    local combatants = C_DeathRecap.GetCombatants()
-    if type(combatants) ~= "table" then return out end
+-- Call a possibly-missing API safely: returns the result, or nil on error/absence.
+local function SafeCall(fn, ...)
+    if type(fn) ~= "function" then return nil end
+    local ok, r1, r2, r3 = pcall(fn, ...)
+    if ok then return r1, r2, r3 end
+    return nil
+end
 
-    for index, combatant in ipairs(combatants) do
-        local name = type(combatant) == "table" and combatant.name or nil
-        local events = C_DeathRecap.GetEvents(index)
-        if type(events) == "table" then
-            for _, ev in ipairs(events) do
-                if type(ev) == "table" and ev.amount then
-                    out[#out + 1] = {
-                        timestamp  = ev.timestamp or 0,
-                        spellID    = ev.spellID,
-                        spellName  = ev.spellName,
-                        amount     = ev.amount or 0,
-                        absorbed   = ev.absorbed,
-                        overkill   = ev.overkill,
-                        sourceName = ResolveSource(name, ev.spellID),
-                    }
-                end
-            end
+-- Is there a recap at this id? Prefer HasRecapEvents; else infer from GetRecapEvents.
+local function HasRecap(id)
+    if C_DeathRecap.HasRecapEvents then
+        return SafeCall(C_DeathRecap.HasRecapEvents, id) and true or false
+    end
+    local e = SafeCall(C_DeathRecap.GetRecapEvents, id)
+    return type(e) == "table" and #e > 0
+end
+
+-- Pick the recap for the MOST RECENT death. Recap ids INCREMENT per death and
+-- the kept set slides upward, so the newest death is the HIGHEST valid id. (A
+-- previous version capped the scan at 10 and went permanently stale once the
+-- death count passed 10 — the classic "same recap forever" bug.) We scan upward,
+-- tracking the highest valid id, and stop a few ids after the valid block ends.
+local function MostRecentRecapID()
+    if not (C_DeathRecap and C_DeathRecap.GetRecapEvents) then return 1 end
+    local best, lastValid, misses = nil, nil, 0
+    for id = 1, 500 do
+        if HasRecap(id) then
+            best, lastValid, misses = id, id, 0
+        elseif lastValid then
+            misses = misses + 1
+            if misses >= 8 then break end  -- walked past the end of the valid block
         end
     end
-    return out
+    return best or 1
+end
+
+-- Normalise one raw recap event into our internal shape, or nil to skip it.
+-- The recap interleaves DAMAGE and HEAL events (the `event`/CLEU subevent tells
+-- which). We keep BOTH — heals are needed to plot the health curve correctly
+-- (health rising) — and tag each with `kind` so Build can use only damage events
+-- for the timeline / sources / killing blow. `currentHP` is the player's health
+-- at that event; `amount` is the magnitude (damage or heal size).
+local function NormalizeEvent(ev)
+    if type(ev) ~= "table" then return nil end
+
+    local subEvent = type(ev.event) == "string" and ev.event or ""
+    local isHeal     = subEvent:find("HEAL") ~= nil
+    local isMelee    = subEvent:find("^SWING") ~= nil
+    local isEnv      = subEvent:find("^ENVIRONMENTAL") ~= nil
+    local isPeriodic = subEvent:find("PERIODIC") ~= nil   -- a DoT / HoT tick
+    local isDamage = (not isHeal) and (isMelee or subEvent:find("DAMAGE") ~= nil)
+
+    local raw = ev.amount
+    local amt = (type(raw) == "number") and (raw < 0 and -raw or raw) or 0
+    local currentHP = ev.currentHP or ev.currentHealth
+    -- Need either a usable amount or a health reading (skips MISSED/etc.).
+    if amt <= 0 and type(currentHP) ~= "number" then return nil end
+
+    local spellID  = ev.spellId or ev.spellID
+    local spellName
+    if isMelee then
+        spellID   = 88163             -- the "Melee" auto-attack spell (proper icon + tooltip)
+        spellName = BDR.L.MELEE
+    elseif not isEnv then
+        spellName = ev.spellName or SpellName(spellID)
+    end
+
+    local source
+    if isEnv then
+        source = ResolveEnvironment(ev)
+    else
+        source = ev.sourceName
+        if not source or source == "" or ev.hideCaster then
+            source = BDR.L.ENV_UNKNOWN
+        end
+    end
+
+    -- The recap uses -1 as a "none" sentinel for overkill/absorbed.
+    local overkill = (type(ev.overkill) == "number" and ev.overkill > 0) and ev.overkill or nil
+    local absorbed = (type(ev.absorbed) == "number" and ev.absorbed > 0) and ev.absorbed or nil
+
+    return {
+        kind       = isHeal and "heal" or (isDamage and "damage" or "other"),
+        periodic   = isPeriodic,
+        timestamp  = ev.timestamp or 0,
+        spellID    = spellID,
+        spellName  = spellName,
+        amount     = amt,
+        absorbed   = absorbed,
+        overkill   = overkill,
+        school     = ev.school or ev.schoolMask or ev.damageSchool,  -- SCHOOL_MASK_* (dot colour)
+        currentHP  = (type(currentHP) == "number") and currentHP or nil,
+        isMelee    = isMelee,
+        sourceName = source,
+    }
+end
+
+-- Pull the most recent death recap: a normalised event list + the recap's max
+-- health (used to scale the reconstructed HP curve). Returns events, maxHP, id.
+local function GatherRecap()
+    local out = {}
+    if not C_DeathRecap then return out, nil, nil end
+
+    local id = MostRecentRecapID()
+    -- GetRecapEvents may take the id (or be arg-less on some builds) — try both.
+    local events = SafeCall(C_DeathRecap.GetRecapEvents, id)
+    if type(events) ~= "table" then events = SafeCall(C_DeathRecap.GetRecapEvents) end
+    local maxHP = SafeCall(C_DeathRecap.GetRecapMaxHealth, id)
+
+    if type(events) == "table" then
+        for _, ev in ipairs(events) do
+            local norm = NormalizeEvent(ev)
+            if norm then out[#out + 1] = norm end
+        end
+    end
+    return out, maxHP, id
+end
+
+-- ── Diagnostics: dump EVERY raw event of the chosen recap (for /bdr dump) ─────
+-- One line per event with the fields that matter, and the time relative to death
+-- (so we can sanity-check the timeline against the combat log). Returns strings.
+function Analyzer:DumpEvents()
+    local lines = {}
+    if not (C_DeathRecap and C_DeathRecap.GetRecapEvents) then
+        lines[1] = "GetRecapEvents not available."
+        return lines
+    end
+    local id = MostRecentRecapID()
+
+    -- Show which recap ids exist + which we picked (confirms we track new deaths).
+    local valid = {}
+    for i = 1, 60 do
+        if HasRecap(i) then valid[#valid + 1] = i end
+    end
+    lines[#lines + 1] = "valid recap ids: " ..
+        (next(valid) and table.concat(valid, ",") or "none") .. "  → using id=" .. tostring(id)
+
+    local raw = SafeCall(C_DeathRecap.GetRecapEvents, id)
+    if type(raw) ~= "table" then raw = SafeCall(C_DeathRecap.GetRecapEvents) end
+    if type(raw) ~= "table" then
+        lines[#lines + 1] = "GetRecapEvents returned no table."
+        return lines
+    end
+
+    local deathT = 0
+    for _, ev in ipairs(raw) do
+        if type(ev.timestamp) == "number" and ev.timestamp > deathT then deathT = ev.timestamp end
+    end
+    -- Where does the report cut? Same gap rule as Build: walk from newest (the
+    -- raw list is newest-first) and stop at the first gap > FIGHT_GAP_SECONDS.
+    local gap = BDR.CONFIG.FIGHT_GAP_SECONDS or 10
+    local kept = #raw
+    for i = 2, #raw do
+        local newer = raw[i - 1].timestamp or 0
+        local older = raw[i].timestamp or 0
+        if type(newer) == "number" and type(older) == "number" and (newer - older) > gap then
+            kept = i - 1
+            break
+        end
+    end
+
+    lines[#lines + 1] = ("recap id=%s  maxHP=%s  events=%d  (report uses the %d most recent — RAW below)"):format(
+        tostring(id), tostring(SafeCall(C_DeathRecap.GetRecapMaxHealth, id)), #raw, kept)
+    for i, ev in ipairs(raw) do
+        local ok, line = pcall(function()
+            local rel = (type(ev.timestamp) == "number" and deathT > 0) and (ev.timestamp - deathT) or 0
+            local tag = (i <= kept) and "" or "  <prev fight, trimmed>"
+            return string.format("#%d t=%.1fs amt=%s ok=%s hp=%s | %s | %s%s",
+                i, rel, tostring(ev.amount), tostring(ev.overkill), tostring(ev.currentHP),
+                tostring(ev.event), tostring(ev.sourceName), tag)
+        end)
+        lines[#lines + 1] = ok and line or ("#" .. i .. " <event unreadable>")
+    end
+    return lines
+end
+
+-- ── Diagnostics: report what the live recap API exposes (for /bdr debug) ──────
+-- Enumerates the actual members of C_DeathRecap (function names vary by patch and
+-- the originally-assumed ones were wrong), plus a few related globals, so we can
+-- discover the real API names from in-game output.
+function Analyzer:Probe()
+    local events, maxHP, id = GatherRecap()
+    local info = {
+        hasNamespace = C_DeathRecap ~= nil,
+        hasGet       = C_DeathRecap and C_DeathRecap.GetRecapEvents ~= nil,
+        hasHas       = C_DeathRecap and C_DeathRecap.HasRecapEvents ~= nil,
+        hasMaxHP     = C_DeathRecap and C_DeathRecap.GetRecapMaxHealth ~= nil,
+        recapID      = id,
+        maxHP        = maxHP,
+        eventCount   = #events,
+        members      = {},
+        globals      = {},
+        firstEvent   = {},
+    }
+
+    -- List C_DeathRecap's real members (guarded — some C_ namespaces resist pairs).
+    if C_DeathRecap then
+        pcall(function()
+            for k in pairs(C_DeathRecap) do
+                if type(k) == "string" then info.members[#info.members + 1] = k end
+            end
+        end)
+        table.sort(info.members)
+    end
+
+    -- Dump the first RAW event's fields, so we can confirm the exact field names.
+    pcall(function()
+        local raw = SafeCall(C_DeathRecap.GetRecapEvents, id)
+        if type(raw) ~= "table" then raw = SafeCall(C_DeathRecap.GetRecapEvents) end
+        if type(raw) == "table" and type(raw[1]) == "table" then
+            for k, v in pairs(raw[1]) do
+                info.firstEvent[#info.firstEvent + 1] = tostring(k) .. "=" .. tostring(v)
+            end
+            table.sort(info.firstEvent)
+        end
+    end)
+
+    -- Related globals worth knowing about.
+    for _, name in ipairs({ "OpenDeathRecapUI", "DeathRecapFrame", "C_PlayerInfo" }) do
+        if _G[name] ~= nil then info.globals[#info.globals + 1] = name end
+    end
+    return info
 end
 
 -- Aggregate per-source damage totals into sorted bars (desc), with percentages.
+-- Also records the spellID of each source's single biggest hit, so the sources
+-- panel can show a representative icon next to the attacker.
 local function BuildSources(events)
     local totals, order = {}, {}
+    local topHit, topSpell = {}, {}  -- per-source largest single hit + its spellID
     local grand = 0
     for _, ev in ipairs(events) do
         local amt = ev.amount or 0
         if amt > 0 then
-            if not totals[ev.sourceName] then
-                totals[ev.sourceName] = 0
-                order[#order + 1] = ev.sourceName
+            local name = ev.sourceName
+            if not totals[name] then
+                totals[name] = 0
+                order[#order + 1] = name
+                topHit[name] = 0
             end
-            totals[ev.sourceName] = totals[ev.sourceName] + amt
+            totals[name] = totals[name] + amt
             grand = grand + amt
+            if amt > topHit[name] then
+                topHit[name]   = amt
+                topSpell[name] = ev.spellID
+            end
         end
     end
 
     local sources = {}
     for _, name in ipairs(order) do
         sources[#sources + 1] = {
-            name  = name,
-            total = totals[name],
-            pct   = grand > 0 and (totals[name] / grand * 100) or 0,
+            name    = name,
+            total   = totals[name],
+            pct     = grand > 0 and (totals[name] / grand * 100) or 0,
+            spellID = topSpell[name],
         }
     end
     table.sort(sources, function(a, b) return a.total > b.total end)
     return sources
 end
 
--- Normalise the health snapshot into a curve of { t = <relative secs>, pct }.
--- `deathTime` is the reference (t = 0 at death; samples are negative seconds).
-local function BuildHealthCurve(snapshot, deathTime)
+-- Build an HP-over-time curve from the recap (never UnitHealth, which is secret
+-- on Midnight). Preferred path: `curveEvents` carry per-event `currentHP` (the
+-- player's actual health, including the rises from heals), plotted directly and
+-- normalised to the **peak observed health** so the line reads ~100% → 0%
+-- (GetRecapMaxHealth was seen returning an implausible value). Fallback: when no
+-- currentHP is available, reconstruct backward from death over the damage events
+-- (health-before = health-after + that hit's effective damage; the killing blow
+-- removes only `amount − overkill`). Both append the death point (t=0, 0%).
+local function BuildRecapCurve(curveEvents, dmgEvents, maxHP, kb)
     local curve = {}
-    if type(snapshot) ~= "table" or type(snapshot.samples) ~= "table" then
+
+    if #curveEvents > 0 then
+        local denom = 0
+        for _, ev in ipairs(curveEvents) do
+            if ev.currentHP > denom then denom = ev.currentHP end
+        end
+        if denom <= 0 then denom = (maxHP and maxHP > 0) and maxHP or 1 end
+        for _, ev in ipairs(curveEvents) do
+            local pct = ev.currentHP / denom * 100
+            curve[#curve + 1] = { t = ev.t, pct = math.max(0, math.min(100, pct)) }
+        end
+        curve[#curve + 1] = { t = 0, pct = 0 }
         return curve
     end
-    local window = BDR.CONFIG.WINDOW_SECONDS
-    for _, s in ipairs(snapshot.samples) do
-        local rel = s.t - deathTime
-        if rel >= -window and rel <= 0 and s.hpMax and s.hpMax > 0 then
-            curve[#curve + 1] = { t = rel, pct = (s.hp / s.hpMax) * 100 }
-        end
+
+    if #dmgEvents == 0 then return curve end
+    local health, afterHP = {}, 0
+    for i = #dmgEvents, 1, -1 do
+        local ev = dmgEvents[i]
+        local eff = ev.amount or 0
+        if ev == kb and ev.overkill and ev.overkill > 0 then eff = eff - ev.overkill end
+        if eff < 0 then eff = 0 end
+        health[i] = afterHP + eff
+        afterHP = health[i]
     end
-    -- Ensure the curve ends at death (0%, t = 0) so the line lands on the dot.
-    if #curve > 0 and curve[#curve].t < 0 then
-        curve[#curve + 1] = { t = 0, pct = 0 }
+    local denom = 0
+    for i = 1, #dmgEvents do if health[i] > denom then denom = health[i] end end
+    if denom <= 0 then denom = (maxHP and maxHP > 0) and maxHP or 1 end
+    for i = 1, #dmgEvents do
+        curve[#curve + 1] = { t = dmgEvents[i].t, pct = math.max(0, math.min(100, health[i] / denom * 100)) }
     end
+    curve[#curve + 1] = { t = 0, pct = 0 }
     return curve
 end
 
 -- Best-effort context line: difficulty, zone, window length.
-local function BuildContext()
-    local zone = (GetRealZoneText and GetRealZoneText()) or "Unknown"
+local function BuildContext(windowSeconds)
+    local zone = (GetRealZoneText and GetRealZoneText()) or BDR.L.UNKNOWN
     local difficulty
     if GetInstanceInfo then
         local _, _, _, diffName = GetInstanceInfo()
@@ -116,57 +352,129 @@ local function BuildContext()
     return {
         difficulty    = difficulty,
         zone          = zone,
-        windowSeconds = BDR.CONFIG.WINDOW_SECONDS,
+        windowSeconds = windowSeconds or BDR.CONFIG.WINDOW_SECONDS,
     }
 end
 
 -- ── Public: build a report from live data ───────────────────────────────────
--- Returns a DeathReport (see CLAUDE.md) or nil if there is nothing to show.
-function Analyzer:Build(snapshot)
-    local events = GatherEvents()
-    if #events == 0 then
-        -- No usable recap events. Still return a minimal report so Display can
-        -- show a "No recap data" state rather than nothing at all.
+-- Returns a DeathReport (see CLAUDE.md). The HP curve is reconstructed from the
+-- recap (BuildRecapCurve), not from UnitHealth samples (which are "secret" on
+-- Midnight), so callers no longer need to pass a health snapshot.
+function Analyzer:Build()
+    local allEvents, maxHP = GatherRecap()
+
+    -- Split the recap: DAMAGE events drive the timeline / sources / killing blow;
+    -- ALL events with a health reading (incl. heals) drive the HP curve.
+    local dmg = {}
+    for _, ev in ipairs(allEvents) do
+        if ev.kind == "damage" and ev.amount > 0 then dmg[#dmg + 1] = ev end
+    end
+
+    if #dmg == 0 then
         return {
             killedAt    = GetTime(),
             killingBlow = nil,
             events      = {},
             sources     = {},
-            healthCurve = BuildHealthCurve(snapshot, (snapshot and snapshot.now) or GetTime()),
+            healthCurve = {},
             context     = BuildContext(),
             empty       = true,
         }
     end
 
-    -- Chronological order (oldest first). The killing blow is the latest hit.
-    table.sort(events, function(a, b) return a.timestamp < b.timestamp end)
-    local kb = events[#events]
-    local deathTime = kb.timestamp ~= 0 and kb.timestamp or ((snapshot and snapshot.now) or GetTime())
+    -- Chronological by real timestamp (epoch seconds from the recap).
+    table.sort(allEvents, function(a, b) return (a.timestamp or 0) < (b.timestamp or 0) end)
+    table.sort(dmg, function(a, b) return (a.timestamp or 0) < (b.timestamp or 0) end)
 
-    -- Re-express timestamps as seconds relative to death (<= 0).
-    local timeline = {}
-    for _, ev in ipairs(events) do
-        timeline[#timeline + 1] = {
-            t            = ev.timestamp ~= 0 and (ev.timestamp - deathTime) or 0,
-            sourceName   = ev.sourceName,
-            spellName    = ev.spellName,
-            spellID      = ev.spellID,
-            amount       = ev.amount,
-            absorbed     = (ev.absorbed and ev.absorbed > 0) and ev.absorbed or nil,
-            isKillingBlow = ev == kb,
-        }
+    local kb = dmg[#dmg]  -- latest damage event = killing blow
+    local deathTime = (kb.timestamp and kb.timestamp ~= 0) and kb.timestamp or GetTime()
+
+    -- Relative-to-death times (<= 0) on the shared event tables. If the recap
+    -- gives no usable timestamps, space the damage hits evenly instead.
+    local span = (allEvents[#allEvents].timestamp or 0) - (allEvents[1].timestamp or 0)
+    if span > 0.05 then
+        for _, ev in ipairs(allEvents) do ev.t = ev.timestamp - deathTime end
+    else
+        local n = #dmg
+        local step = BDR.CONFIG.WINDOW_SECONDS / math.max(1, n - 1)
+        for i, ev in ipairs(dmg) do ev.t = -((n - i) * step) end
+        for _, ev in ipairs(allEvents) do ev.t = ev.t or 0 end
     end
 
-    -- Cap the rendered timeline to the most recent N hits (oldest dropped) but
-    -- always keep the killing blow (it's last, so it survives the tail cut).
-    local maxRows = BDR.CONFIG.MAX_TIMELINE
-    if #timeline > maxRows then
-        local trimmed = {}
-        for i = #timeline - maxRows + 1, #timeline do
-            trimmed[#trimmed + 1] = timeline[i]
+    -- Trim to the fight that actually killed us. The recap is a fixed-COUNT
+    -- buffer, so older events from a previous fight can trail behind a big time
+    -- gap. allEvents is ascending by time; walk back from death and cut at the
+    -- first gap larger than FIGHT_GAP_SECONDS.
+    do
+        local gap = BDR.CONFIG.FIGHT_GAP_SECONDS or 10
+        local startIdx = 1
+        for i = #allEvents, 2, -1 do
+            if (allEvents[i].t - allEvents[i - 1].t) > gap then
+                startIdx = i
+                break
+            end
         end
-        timeline = trimmed
+        if startIdx > 1 then
+            local kept = {}
+            for i = startIdx, #allEvents do kept[#kept + 1] = allEvents[i] end
+            allEvents = kept
+        end
     end
+
+    -- Re-derive the damage subset from the trimmed events (excludes prior fights).
+    dmg = {}
+    for _, ev in ipairs(allEvents) do
+        if ev.kind == "damage" and ev.amount > 0 then dmg[#dmg + 1] = ev end
+    end
+
+    -- Curve events: those carrying a health reading, in time order.
+    local curveEvents = {}
+    for _, ev in ipairs(allEvents) do
+        if type(ev.currentHP) == "number" then curveEvents[#curveEvents + 1] = ev end
+    end
+
+    -- Window fits the actual fight (small floor so a 1–2 hit death isn't a
+    -- zero-width graph). No artificial minimum — a 4s fight shows a ~4s axis.
+    local oldestT = dmg[1].t or 0
+    if #curveEvents > 0 and (curveEvents[1].t or 0) < oldestT then oldestT = curveEvents[1].t end
+    local window = math.max(3, math.ceil(-oldestT))
+
+    -- Full event list (every damage AND heal in the fight, chronological) — the
+    -- table lists these and the graph marks them. `kind` drives the Type column /
+    -- marker shape (damage = red circle, heal = green triangle).
+    local hits = {}
+    for _, ev in ipairs(allEvents) do
+        if (ev.kind == "damage" or ev.kind == "heal") and (ev.amount or 0) > 0 then
+            hits[#hits + 1] = {
+                t            = ev.t,
+                kind         = ev.kind,
+                periodic     = ev.periodic,    -- DoT / HoT tick
+                sourceName   = ev.sourceName,
+                spellName    = ev.spellName,
+                spellID      = ev.spellID,
+                school       = ev.school,       -- SCHOOL_MASK_* (graph dot colour)
+                amount       = ev.amount,
+                absorbed     = (ev.absorbed and ev.absorbed > 0) and ev.absorbed or nil,
+                currentHP    = ev.currentHP,   -- health when this event landed (for the graph)
+                isKillingBlow = ev == kb,
+            }
+        end
+    end
+
+    -- Timeline rows are capped to fit the right column (oldest rows drop, but the
+    -- killing blow is last so it always survives). The graph still marks every hit.
+    local timeline = hits
+    local maxRows = BDR.CONFIG.MAX_TIMELINE
+    if #hits > maxRows then
+        timeline = {}
+        for i = #hits - maxRows + 1, #hits do
+            timeline[#timeline + 1] = hits[i]
+        end
+    end
+
+    -- HP curve, isolated so any hiccup can only blank the graph, never the report.
+    local ok, curve = pcall(BuildRecapCurve, curveEvents, dmg, maxHP, kb)
+    if not (ok and type(curve) == "table") then curve = {} end
 
     return {
         killedAt    = deathTime,
@@ -178,46 +486,71 @@ function Analyzer:Build(snapshot)
             overkill   = (kb.overkill and kb.overkill > 0) and kb.overkill or nil,
         },
         events      = timeline,
-        sources     = BuildSources(events),
-        healthCurve = BuildHealthCurve(snapshot, deathTime),
-        context     = BuildContext(),
+        hits        = hits,               -- full hit list for graph markers
+        sources     = BuildSources(dmg),  -- damage-only (heals excluded)
+        healthCurve = curve,
+        context     = BuildContext(window),
     }
 end
 
 -- ── Public: built-in sample report (for /bdr test) ──────────────────────────
 -- Lets the UI be iterated on without dying in-game. Shapes match Build() output.
 function Analyzer:SampleReport()
-    local curve = {}
-    -- A plausible decline: chip damage, a big setup hit, then the killing blow.
-    local pcts = { 100, 98, 95, 88, 86, 60, 58, 55, 30, 28, 12, 0 }
-    for i, pct in ipairs(pcts) do
-        curve[i] = { t = -8 + (i - 1) * (8 / (#pcts - 1)), pct = pct }
-    end
+    -- Mirrors the DESIGN.png mock-up: a high plateau that plunges in the last few
+    -- seconds. Curve points sit at the hit times so the table's "% Max HP" column
+    -- reads each hit's share (before% − after%) straight off the curve.
+    local curve = {
+        { t = -16.0, pct = 100 },
+        { t = -13.0, pct = 96  },
+        { t = -10.0, pct = 92  },
+        { t = -7.5,  pct = 82  },
+        { t = -5.5,  pct = 70  },
+        { t = -4.5,  pct = 84  },  -- a heal lands here: HP bumps back up
+        { t = -3.5,  pct = 55  },
+        { t = -1.5,  pct = 37  },
+        { t = 0,     pct = 0   },
+    }
 
+    -- Chronological (oldest → newest); the killing blow is last, at t = 0. Eight
+    -- hits so the table overflows its viewport and shows the "Scroll for more" hint.
+    local function H(t, source, spell, id, amount, school, extra)
+        local h = { t = t, kind = "damage", sourceName = source, spellName = spell,
+                    spellID = id, amount = amount, school = school }
+        if extra then for k, v in pairs(extra) do h[k] = v end end
+        return h
+    end
+    -- school masks: 1 Physical · 4 Fire · 16 Frost · 32 Shadow
+    local hits = {
+        H(-16.0, "Decaying Horror", "Bone Nova",  49158, 6400,  16),
+        { t = -13.0, kind = "damage", periodic = true, sourceName = "Mephisto",
+          spellName = "Corruption", spellID = 172, amount = 8100, school = 32 },   -- DoT (Shadow)
+        { t = -11.0, kind = "damage", sourceName = "Mephisto",
+          spellName = "Melee", spellID = 88163, amount = 15000, school = 1 },      -- melee (Physical)
+        H(-10.0, "Decaying Horror", "Bone Nova",  49158, 9800,  16),
+        H(-7.5,  "Mephisto",        "Desolation", 47897, 12165, 32),
+        { t = -6.5, kind = "heal", periodic = true, sourceName = "Field Medic",
+          spellName = "Renew", spellID = 139, amount = 6000 },                     -- HoT tick
+        H(-5.5,  "Decaying Horror", "Bone Nova",  49158, 18972, 16),
+        { t = -4.5, kind = "heal", sourceName = "Field Medic",
+          spellName = "Flash Heal", spellID = 2061, amount = 32000 },              -- direct heal
+        H(-3.5,  "Mephisto",        "Desolation", 47897, 21515, 32),
+        H(-1.5,  "Mephisto",        "Desolation", 47897, 28441, 32),
+        H(0,     "Mephisto",        "Soulfire",   6353,  78023, 4, { overkill = 12000, isKillingBlow = true }),
+    }
     return {
         killedAt    = GetTime(),
-        killingBlow = { sourceName = "Voidflame Tyrant", spellName = "Cataclysm",
-                        spellID = 1604, amount = 482000, overkill = 71000 },
-        events = {
-            { t = -7.4, sourceName = "Voidflame Tyrant", spellName = "Shadow Bolt",
-              spellID = 686, amount = 42000 },
-            { t = -6.1, sourceName = "Searing Imp", spellName = "Fireball",
-              spellID = 133, amount = 38000 },
-            { t = -4.8, sourceName = "Voidflame Tyrant", spellName = "Dark Nova",
-              spellID = 1949, amount = 96000, absorbed = 21000 },
-            { t = -3.0, sourceName = "Searing Imp", spellName = "Fireball",
-              spellID = 133, amount = 41000 },
-            { t = -1.2, sourceName = "Voidflame Tyrant", spellName = "Shadow Bolt",
-              spellID = 686, amount = 58000 },
-            { t = 0,    sourceName = "Voidflame Tyrant", spellName = "Cataclysm",
-              spellID = 1604, amount = 482000, isKillingBlow = true },
-        },
+        killingBlow = { sourceName = "Mephisto", spellName = "Soulfire",
+                        spellID = 6353, amount = 78023, overkill = 12000 },
+        events = hits,
+        hits   = hits,
         sources = {
-            { name = "Voidflame Tyrant", total = 678000, pct = 89.6 },
-            { name = "Searing Imp",      total = 79000,  pct = 10.4 },
+            { name = "Mephisto",        total = 143753, pct = 78.1, spellID = 6353  },
+            { name = "Decaying Horror", total = 26481,  pct = 14.3, spellID = 49158 },
+            { name = "Doom Bolt",       total = 10547,  pct = 5.7,  spellID = 603   },
+            { name = "Shade of Doom",   total = 3512,   pct = 1.7,  spellID = 17877 },
         },
         healthCurve = curve,
-        context = { difficulty = "Mythic", zone = "The Ember Court", windowSeconds = 8 },
+        context = { difficulty = "Heroic", zone = "The Burning Throne", windowSeconds = 10 },
         isSample = true,
     }
 end

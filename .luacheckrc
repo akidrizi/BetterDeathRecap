@@ -33,9 +33,22 @@ globals = {
     "UnitName",
     "UnitExists",
 
-    -- Spell info (icon swatches in the timeline)
+    -- Spell info (icon swatches + names in the timeline)
     "C_Spell",
     "GetSpellTexture",
+    "GetSpellInfo",
+
+    -- Texture / atlas helpers (scrollbar restyle)
+    "C_Texture",
+
+    -- Death recap probing / on-death button anchoring
+    "DEATHRECAP_NUM_RECAPS",
+    "STATICPOPUP_NUMDIALOGS",
+    "RECAP",
+    "_G",
+
+    -- Localization
+    "GetLocale",
 
     -- World / context info (footer line)
     "GetRealZoneText",
@@ -49,6 +62,7 @@ globals = {
     "CreateFrame",
     "UIParent",
     "GameTooltip",
+    "GetCursorPosition",
     "DEFAULT_CHAT_FRAME",
     "GetTime",
     "UISpecialFrames",
@@ -72,6 +86,8 @@ globals = {
 
 -- ── Per-file overrides ─────────────────────────────────────────────────────
 files = {
+    -- Translated strings can legitimately exceed the default line length.
+    ["src/Locale.lua"] = { max_line_length = 200 },
     ["src/Constants.lua"] = {
         -- Constants intentionally uses the addon table from vararg, which
         -- luacheck sees as an implicit global write. Suppress that warning.
