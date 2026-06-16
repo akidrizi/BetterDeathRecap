@@ -19,10 +19,10 @@ local btn
 -- rebuild from the current recap + the death-time health snapshot, falling back
 -- to the stored report, and finally to a friendly "no death" message.
 local function OpenReport()
-    local report = BDR.DB.lastReport
+    local report = BDR.GetLastReport()
     local fresh  = BDR.Analyzer:Build()
     if fresh and not fresh.empty then
-        BDR.DB.lastReport = fresh
+        BDR.SetLastReport(fresh)
         report = fresh
     end
     if report then
@@ -65,13 +65,29 @@ local function FindDeathPopup()
     return nil
 end
 
--- Within the death popup, try to find Blizzard's "Recap" button specifically so
--- we can sit just to its right. Matches by the localized RECAP label when that
--- global exists; otherwise returns nil (caller anchors to the popup edge).
+-- Does this button text name Blizzard's death-recap button? Matches known
+-- localized labels, then falls back to an English "recap" substring. Excludes our
+-- own "Better Recap" text so we never anchor to ourselves.
+local function looksLikeRecap(txt)
+    if type(txt) ~= "string" or txt == "" then return false end
+    if txt == BDR.L.BTN_RECAP then return false end       -- our own button
+    for _, l in ipairs({ _G.RECAP, _G.DEATHRECAP, _G.DEATH_RECAP }) do
+        if l and txt == l then return true end
+    end
+    return txt:lower():find("recap") ~= nil
+end
+
+-- Within the death popup, find Blizzard's "Recap" button so we can sit just to its
+-- right. Checks the standard StaticPopup buttons (button1..4) and any visible child
+-- button; returns nil if none found (caller then anchors to the popup edge).
 local function FindRecapButton(popup)
-    local label = _G.RECAP or "Recap"
+    local name = popup:GetName()
+    for n = 1, 4 do
+        local b = popup["button" .. n] or (name and _G[name .. "Button" .. n])
+        if b and b.GetText and b:IsShown() and looksLikeRecap(b:GetText()) then return b end
+    end
     for _, child in ipairs({ popup:GetChildren() }) do
-        if child.GetText and child:GetText() == label and child:IsShown() then
+        if child.GetText and child:IsShown() and looksLikeRecap(child:GetText()) then
             return child
         end
     end
@@ -86,11 +102,11 @@ local function Anchor()
 
     local popup = FindDeathPopup()
     if popup then
+        local recap = FindRecapButton(popup)   -- find BEFORE reparenting (so we don't match ourselves)
         btn:SetParent(popup)
         btn:SetFrameStrata("FULLSCREEN_DIALOG")
-        local recap = FindRecapButton(popup)
         if recap then
-            -- Sit in the dialog's button row as a 4th button: match the Recap
+            -- Sit in the dialog's button row as the next button: match the Recap
             -- button's size/level and use the same small inter-button gap so the
             -- row reads Release | Reincarnation | Recap | Better Recap.
             local w, h = recap:GetSize()

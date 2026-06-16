@@ -11,15 +11,23 @@ BDR.Analyzer = Analyzer
 
 -- ── Helpers ─────────────────────────────────────────────────────────────────
 
--- Map an ENVIRONMENTAL_DAMAGE event to a localized label (Falling, Fire, …).
--- CLEU exposes the kind as a string token (e.g. "Falling"); we key it to ENV_*.
+-- Resolve an ENVIRONMENTAL_DAMAGE event to (localized label, icon). The kind comes
+-- either as a CLEU string token (e.g. "Falling") or via a sentinel spellID mapped
+-- in BDR.ENVIRONMENT. Blizzard has no spell for these, so we supply a stock icon
+-- (BDR.ENV_ICONS) per type — UNKNOWN is the catch-all.
 local function ResolveEnvironment(ev)
-    local kind = ev.environmentalType or ev.environmentType
-    if type(kind) == "string" and kind ~= "" then
-        local key = "ENV_" .. kind:upper()
-        return BDR.L[key] or kind
+    local token = ev.environmentalType or ev.environmentType
+    local key   -- normalized UPPER token, e.g. "FALLING"
+    if type(token) == "string" and token ~= "" then
+        key = token:upper()
+    else
+        local sentinel = ev.spellId or ev.spellID
+        local locKey = sentinel and BDR.ENVIRONMENT[sentinel]   -- "ENV_FALLING"
+        if locKey then key = locKey:gsub("^ENV_", "") end
     end
-    return BDR.L.ENV_UNKNOWN
+    local label = (key and BDR.L["ENV_" .. key]) or BDR.L.ENV_UNKNOWN
+    local icon  = (key and BDR.ENV_ICONS[key]) or BDR.ENV_ICONS.UNKNOWN
+    return label, icon
 end
 
 -- Resolve a spell's display name from its ID (recap events carry only the ID).
@@ -84,31 +92,40 @@ local function NormalizeEvent(ev)
     local isMelee    = subEvent:find("^SWING") ~= nil
     local isEnv      = subEvent:find("^ENVIRONMENTAL") ~= nil
     local isPeriodic = subEvent:find("PERIODIC") ~= nil   -- a DoT / HoT tick
-    local isDamage = (not isHeal) and (isMelee or subEvent:find("DAMAGE") ~= nil)
+    -- Instant-death effects (e.g. SPELL_INSTAKILL — Atomize and similar one-shots)
+    -- carry NO amount, but they ARE the killing blow. Treat them as damage so the
+    -- addon recognises the death instead of dropping the event.
+    local isInstaKill = subEvent:find("INSTAKILL") ~= nil
+    local isDamage = (not isHeal) and (isMelee or isInstaKill or subEvent:find("DAMAGE") ~= nil)
 
     local raw = ev.amount
     local amt = (type(raw) == "number") and (raw < 0 and -raw or raw) or 0
     local currentHP = ev.currentHP or ev.currentHealth
+    -- An insta-kill removed all your HP; use the HP it took (currentHP) as the
+    -- "damage", or a placeholder (refined to max HP in Build) when not given.
+    if isInstaKill and amt <= 0 then
+        amt = (type(currentHP) == "number" and currentHP > 0) and currentHP or 1
+    end
     -- Need either a usable amount or a health reading (skips MISSED/etc.).
     if amt <= 0 and type(currentHP) ~= "number" then return nil end
 
     local spellID  = ev.spellId or ev.spellID
-    local spellName
+    local spellName, iconOverride
+    local source
     if isMelee then
         spellID   = 88163             -- the "Melee" auto-attack spell (proper icon + tooltip)
         spellName = BDR.L.MELEE
-    elseif not isEnv then
-        spellName = ev.spellName or SpellName(spellID)
-    end
-
-    local source
-    if isEnv then
-        source = ResolveEnvironment(ev)
+        source    = ev.sourceName
+        if not source or source == "" or ev.hideCaster then source = BDR.L.ENV_UNKNOWN end
+    elseif isEnv then
+        -- No real spell — the environmental TYPE is the event, with a stock icon.
+        spellName, iconOverride = ResolveEnvironment(ev)
+        spellID = nil
+        source  = spellName           -- the env label doubles as the "source"
     else
-        source = ev.sourceName
-        if not source or source == "" or ev.hideCaster then
-            source = BDR.L.ENV_UNKNOWN
-        end
+        spellName = ev.spellName or SpellName(spellID)
+        source    = ev.sourceName
+        if not source or source == "" or ev.hideCaster then source = BDR.L.ENV_UNKNOWN end
     end
 
     -- The recap uses -1 as a "none" sentinel for overkill/absorbed.
@@ -127,7 +144,11 @@ local function NormalizeEvent(ev)
         school     = ev.school or ev.schoolMask or ev.damageSchool,  -- SCHOOL_MASK_* (dot colour)
         currentHP  = (type(currentHP) == "number") and currentHP or nil,
         isMelee    = isMelee,
+        isEnv      = isEnv,
+        isInstaKill = isInstaKill,
+        iconOverride = iconOverride,  -- environmental stock icon (no spell icon exists)
         sourceName = source,
+        sourceGUID = ev.sourceGUID,   -- best-effort killer portrait (Display extracts the creatureID)
     }
 end
 
@@ -144,9 +165,11 @@ local function GatherRecap()
     local maxHP = SafeCall(C_DeathRecap.GetRecapMaxHealth, id)
 
     if type(events) == "table" then
-        for _, ev in ipairs(events) do
+        -- The recap array is newest-first; remember each event's position so we can
+        -- keep Blizzard's exact order when timestamps tie (same-tick melee + spell).
+        for i, ev in ipairs(events) do
             local norm = NormalizeEvent(ev)
-            if norm then out[#out + 1] = norm end
+            if norm then norm.recapIndex = i; out[#out + 1] = norm end
         end
     end
     return out, maxHP, id
@@ -263,7 +286,7 @@ end
 -- panel can show a representative icon next to the attacker.
 local function BuildSources(events)
     local totals, order = {}, {}
-    local topHit, topSpell = {}, {}  -- per-source largest single hit + its spellID
+    local topHit, topSpell, topIcon, guid = {}, {}, {}, {}  -- per-source biggest hit + icon + a GUID
     local grand = 0
     for _, ev in ipairs(events) do
         local amt = ev.amount or 0
@@ -276,9 +299,11 @@ local function BuildSources(events)
             end
             totals[name] = totals[name] + amt
             grand = grand + amt
+            if ev.sourceGUID then guid[name] = ev.sourceGUID end  -- for the source portrait
             if amt > topHit[name] then
                 topHit[name]   = amt
                 topSpell[name] = ev.spellID
+                topIcon[name]  = ev.iconOverride   -- environmental stock icon, if any
             end
         end
     end
@@ -290,6 +315,8 @@ local function BuildSources(events)
             total   = totals[name],
             pct     = grand > 0 and (totals[name] / grand * 100) or 0,
             spellID = topSpell[name],
+            iconOverride = topIcon[name],
+            sourceGUID = guid[name],
         }
     end
     table.sort(sources, function(a, b) return a.total > b.total end)
@@ -298,21 +325,31 @@ end
 
 -- Build an HP-over-time curve from the recap (never UnitHealth, which is secret
 -- on Midnight). Preferred path: `curveEvents` carry per-event `currentHP` (the
--- player's actual health, including the rises from heals), plotted directly and
--- normalised to the **peak observed health** so the line reads ~100% → 0%
--- (GetRecapMaxHealth was seen returning an implausible value). Fallback: when no
--- currentHP is available, reconstruct backward from death over the damage events
+-- player's actual health when each hit landed), plotted directly. Both paths
+-- normalise to `realMax` — the player's REAL max health (GetRecapMaxHealth on the
+-- newest recap id, or UnitHealthMax) — so a fight that OPENED below full health
+-- reads e.g. 60% at the start instead of a false 100%. Only when no real max is
+-- known do we fall back to the peak observed health (the OLD behaviour, which
+-- forced the first point to 100% — the bug this replaces). Fallback when no
+-- currentHP exists: reconstruct backward from death over the damage events
 -- (health-before = health-after + that hit's effective damage; the killing blow
 -- removes only `amount − overkill`). Both append the death point (t=0, 0%).
-local function BuildRecapCurve(curveEvents, dmgEvents, maxHP, kb)
+local function BuildRecapCurve(curveEvents, dmgEvents, realMax, kb)
     local curve = {}
 
+    -- Denominator: the real max health when known, else the peak observed health.
+    local function denomFor(peak)
+        if realMax and realMax > 0 then return realMax end
+        if peak > 0 then return peak end
+        return 1
+    end
+
     if #curveEvents > 0 then
-        local denom = 0
+        local peak = 0
         for _, ev in ipairs(curveEvents) do
-            if ev.currentHP > denom then denom = ev.currentHP end
+            if ev.currentHP > peak then peak = ev.currentHP end
         end
-        if denom <= 0 then denom = (maxHP and maxHP > 0) and maxHP or 1 end
+        local denom = denomFor(peak)
         for _, ev in ipairs(curveEvents) do
             local pct = ev.currentHP / denom * 100
             curve[#curve + 1] = { t = ev.t, pct = math.max(0, math.min(100, pct)) }
@@ -331,9 +368,9 @@ local function BuildRecapCurve(curveEvents, dmgEvents, maxHP, kb)
         health[i] = afterHP + eff
         afterHP = health[i]
     end
-    local denom = 0
-    for i = 1, #dmgEvents do if health[i] > denom then denom = health[i] end end
-    if denom <= 0 then denom = (maxHP and maxHP > 0) and maxHP or 1 end
+    local peak = 0
+    for i = 1, #dmgEvents do if health[i] > peak then peak = health[i] end end
+    local denom = denomFor(peak)
     for i = 1, #dmgEvents do
         curve[#curve + 1] = { t = dmgEvents[i].t, pct = math.max(0, math.min(100, health[i] / denom * 100)) }
     end
@@ -382,9 +419,16 @@ function Analyzer:Build()
         }
     end
 
-    -- Chronological by real timestamp (epoch seconds from the recap).
-    table.sort(allEvents, function(a, b) return (a.timestamp or 0) < (b.timestamp or 0) end)
-    table.sort(dmg, function(a, b) return (a.timestamp or 0) < (b.timestamp or 0) end)
+    -- Chronological by real timestamp (epoch seconds). STABLE on ties: same-tick
+    -- events keep the recap's order (higher recapIndex = older), so when reversed
+    -- for the newest-first table they read exactly like Blizzard's recap.
+    local function byTime(a, b)
+        local ta, tb = a.timestamp or 0, b.timestamp or 0
+        if ta ~= tb then return ta < tb end
+        return (a.recapIndex or 0) > (b.recapIndex or 0)
+    end
+    table.sort(allEvents, byTime)
+    table.sort(dmg, byTime)
 
     local kb = dmg[#dmg]  -- latest damage event = killing blow
     local deathTime = (kb.timestamp and kb.timestamp ~= 0) and kb.timestamp or GetTime()
@@ -455,7 +499,11 @@ function Analyzer:Build()
                 school       = ev.school,       -- SCHOOL_MASK_* (graph dot colour)
                 amount       = ev.amount,
                 absorbed     = (ev.absorbed and ev.absorbed > 0) and ev.absorbed or nil,
+                overkill     = (ev.overkill and ev.overkill > 0) and ev.overkill or nil,
                 currentHP    = ev.currentHP,   -- health when this event landed (for the graph)
+                isEnv        = ev.isEnv,
+                isInstaKill  = ev.isInstaKill, -- instant-death effect (no real amount)
+                iconOverride = ev.iconOverride, -- environmental stock icon
                 isKillingBlow = ev == kb,
             }
         end
@@ -472,18 +520,61 @@ function Analyzer:Build()
         end
     end
 
+    -- Real max health for the curve denominator (fixes the "always starts at 100%"
+    -- bug when the fight opened below full HP). GetRecapMaxHealth is reliable on the
+    -- newest recap id; UnitHealthMax (non-secret on Midnight) is the cross-check /
+    -- backup. We never let the denominator fall below the peak observed HP.
+    local recapMax = (type(maxHP) == "number" and maxHP > 0) and maxHP or 0
+    local unitMax = 0
+    do
+        local okm, um = pcall(function() return UnitHealthMax and UnitHealthMax("player") end)
+        if okm and type(um) == "number" and um > 0 then unitMax = um end
+    end
+    local peakHP = 0
+    for _, ev in ipairs(allEvents) do
+        if type(ev.currentHP) == "number" and ev.currentHP > peakHP then peakHP = ev.currentHP end
+    end
+    local realMax
+    if recapMax > 0 and (unitMax == 0 or recapMax <= unitMax * 1.5) then
+        realMax = recapMax            -- trust the recap's own max
+    elseif unitMax > 0 then
+        realMax = unitMax             -- recap max looked implausible → use the unit's
+    else
+        realMax = recapMax
+    end
+    if realMax < peakHP then realMax = peakHP end
+
+    -- Per-hit remaining HP% = the player's health WHEN each hit landed (its own
+    -- currentHP / realMax). The table + graph dot read this so the KILLING BLOW
+    -- shows the HP you had when it hit (e.g. 2%), NOT 0 — the curve appends a death
+    -- point at t=0, so reading the curve at the KB's time would always give 0.
+    if realMax > 0 then
+        for _, h in ipairs(hits) do
+            if type(h.currentHP) == "number" then
+                h.hpPct = math.max(0, math.min(100, h.currentHP / realMax * 100))
+            end
+            -- Insta-kill with only a placeholder amount: the HP it removed is realMax.
+            if h.isInstaKill and (h.amount or 0) <= 1 then h.amount = realMax end
+        end
+        if kb.isInstaKill and (kb.amount or 0) <= 1 then kb.amount = realMax end
+    end
+
     -- HP curve, isolated so any hiccup can only blank the graph, never the report.
-    local ok, curve = pcall(BuildRecapCurve, curveEvents, dmg, maxHP, kb)
+    local ok, curve = pcall(BuildRecapCurve, curveEvents, dmg, realMax, kb)
     if not (ok and type(curve) == "table") then curve = {} end
 
     return {
         killedAt    = deathTime,
         killingBlow = {
             sourceName = kb.sourceName,
+            sourceGUID = kb.sourceGUID,   -- best-effort killer portrait
             spellName  = kb.spellName,
             spellID    = kb.spellID,
             amount     = kb.amount,
             overkill   = (kb.overkill and kb.overkill > 0) and kb.overkill or nil,
+            isEnv      = kb.isEnv,
+            isInstaKill = kb.isInstaKill,
+            iconOverride = kb.iconOverride,  -- environmental stock icon (no spell icon)
         },
         events      = timeline,
         hits        = hits,               -- full hit list for graph markers
@@ -508,7 +599,8 @@ function Analyzer:SampleReport()
         { t = -4.5,  pct = 84  },  -- a heal lands here: HP bumps back up
         { t = -3.5,  pct = 55  },
         { t = -1.5,  pct = 37  },
-        { t = 0,     pct = 0   },
+        { t = 0,     pct = 6   },  -- HP when the killing blow landed (matches its hpPct)
+        { t = 0,     pct = 0   },  -- death
     }
 
     -- Chronological (oldest → newest); the killing blow is last, at t = 0. Eight
@@ -535,7 +627,8 @@ function Analyzer:SampleReport()
           spellName = "Flash Heal", spellID = 2061, amount = 32000 },              -- direct heal
         H(-3.5,  "Mephisto",        "Desolation", 47897, 21515, 32),
         H(-1.5,  "Mephisto",        "Desolation", 47897, 28441, 32),
-        H(0,     "Mephisto",        "Soulfire",   6353,  78023, 4, { overkill = 12000, isKillingBlow = true }),
+        H(0,     "Mephisto",        "Soulfire",   6353,  78023, 4,
+          { overkill = 12000, isKillingBlow = true, hpPct = 6 }),  -- hit you at 6% HP (not 0)
     }
     return {
         killedAt    = GetTime(),

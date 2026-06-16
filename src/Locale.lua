@@ -48,27 +48,23 @@ local L_enUS = {
 
     -- HP graph
     GRAPH_LABEL      = "HP · last %ds",   -- %d = window length in seconds
-    HP_HEADER        = "HEALTH TIMELINE · LAST %dS",  -- graph section header (all caps; %dS = window)
+    HP_HEADER        = "HEALTH TIMELINE • LAST %dS",  -- graph section header (all caps; %dS = window; • = brand dot)
     AXIS_DEATH       = "death",
     HP_UNAVAILABLE   = "HP graph unavailable here",
-    LEGEND_HEALTH    = "Health",
-    LEGEND_ABSORB    = "Absorb Shield",
-    LEGEND_HIT       = "Damage",
-    LEGEND_HEAL      = "Heal",
-    ABSORB_DEPLETED  = "absorb depleted %ds",  -- %d = seconds before death
+    GRAPH_HINT       = "scroll to zoom",   -- top-right hint on the graph
 
-    -- Combat event table
+    -- Combat event table (columns: Time · Event · Source · Damage · Remaining HP)
     TBL_TIME         = "Time",
-    TBL_ABILITY      = "Ability",
-    TBL_TYPE         = "Type",
-    TBL_AMOUNT       = "Amount",
-    TBL_PCTHP        = "% Max HP",
-    TYPE_HIT         = "Hit",
-    TYPE_HEAL        = "Heal",
-    TYPE_DOT         = "DoT",   -- periodic damage (gaming term; left untranslated)
-    TYPE_HOT         = "HoT",   -- periodic heal (gaming term; left untranslated)
+    TBL_EVENT        = "Event",
+    TBL_SOURCE       = "Source",
+    TBL_DAMAGE       = "Damage",
+    TBL_REMAINING    = "Remaining Health",
+    TYPE_HIT         = "Hit",      -- graph hover tooltip: a damage hit
+    TYPE_HEAL        = "Heal",     -- graph hover tooltip: a heal
     SCROLL_MORE      = "Scroll for more",
     TOTAL_DAMAGE     = "Total Damage",
+    SRC_EXPAND       = "Click to expand damage sources",    -- Total Damage hover (collapsed)
+    SRC_COLLAPSE     = "Click to collapse damage sources",  -- Total Damage hover (expanded)
 
     -- Killing-blow banner
     KILLED_BY        = "KILLED BY",
@@ -80,17 +76,34 @@ local L_enUS = {
     ABSORBED         = "absorbed %s",     -- %s = formatted amount
     BANNER_UNKNOWN   = "Killed. Source unknown.",
     OVERKILL         = "(%s overkill)",   -- %s = formatted amount
+    INSTANT_KILL     = "(instant kill)",  -- killing blow was an instant-death effect
     MORE_HITS        = "%d more hits · click to expand",
     COLLAPSE         = "collapse",
     TOTAL            = "total: %s",       -- %s = formatted amount
     TIP_SOURCE       = "Source",       -- graph tooltip: who dealt the hit
     TIP_SCHOOL       = "School",       -- graph tooltip: damage school
     TIP_HP_CHANGE    = "% Max HP",     -- graph tooltip: HP delta as % of max
+    TIP_HIT_PCT      = "Hit %",        -- graph tooltip: this hit as % of max HP
+    -- Graph hover: minimal line (yellow). %.3f = seconds before death, %d = HP%.
+    TIP_BEFORE_DEATH = "%.3f sec before death at %d%% health.",
+    TIP_KB_AT        = "Killing blow at %d%% health.",   -- minimal line for the killing blow
+
+    -- Table-row hover tooltip (Blizzard-style: damage / spell / HP / time)
+    TIP_OVERKILL     = "(%s Overkill)",          -- %s = formatted overkill amount
+    TIP_BY           = "%s by %s",               -- spell by source
+    TIP_HP_REMAINING = "%d%% health remaining",  -- %d = remaining HP percent
+    TIP_HP_KB        = "Killing blow at %d%% health",
+    TIP_TIME_BEFORE  = "%.3fs before death",     -- %.3f = seconds before death (ms)
+
+    -- Options panel + minimap button
+    OPT_MINIMAP_ICON = "Minimap Icon",
+    MINIMAP_LEFT     = "Left-click: open the recap",
+    MINIMAP_RIGHT    = "Right-click: options",
 
     -- Footer
     FOOTER_WINDOW    = "%ds window",      -- %d = window length in seconds
     FOOTER_SAMPLE    = "(sample — /bdr)",
-    FOOTER_HINT      = "/bdr toggle",
+    FOOTER_HINT      = "/bdr",
 
     -- Empty / fallbacks
     EMPTY            = "No recap data for this death.",
@@ -131,7 +144,6 @@ local L_deDE = setmetatable({
     OVERKILL         = "(%s Overkill)",
     FOOTER_WINDOW    = "%ds Fenster",
     FOOTER_SAMPLE    = "(Beispiel — /bdr)",
-    FOOTER_HINT      = "/bdr umschalten",
     EMPTY            = "Keine Recap-Daten für diesen Tod.",
     UNKNOWN          = "Unbekannt",
     ENV_DROWNING     = "Ertrinken",
@@ -168,7 +180,6 @@ local L_frFR = setmetatable({
     OVERKILL         = "(%s de surplus)",
     FOOTER_WINDOW    = "fenêtre de %ds",
     FOOTER_SAMPLE    = "(exemple — /bdr)",
-    FOOTER_HINT      = "/bdr basculer",
     EMPTY            = "Aucune donnée de récap pour cette mort.",
     UNKNOWN          = "Inconnu",
     ENV_DROWNING     = "Noyade",
@@ -205,7 +216,6 @@ local L_esES = setmetatable({
     OVERKILL         = "(%s de exceso)",
     FOOTER_WINDOW    = "ventana de %ds",
     FOOTER_SAMPLE    = "(ejemplo — /bdr)",
-    FOOTER_HINT      = "/bdr alternar",
     EMPTY            = "No hay datos de resumen para esta muerte.",
     UNKNOWN          = "Desconocido",
     ENV_DROWNING     = "Ahogamiento",
@@ -242,7 +252,6 @@ local L_ruRU = setmetatable({
     OVERKILL         = "(%s избыточно)",
     FOOTER_WINDOW    = "окно %ds",
     FOOTER_SAMPLE    = "(пример — /bdr)",
-    FOOTER_HINT      = "/bdr переключить",
     EMPTY            = "Нет данных о гибели для этой смерти.",
     UNKNOWN          = "Неизвестно",
     ENV_DROWNING     = "Утопление",
@@ -279,7 +288,6 @@ local L_ptBR = setmetatable({
     OVERKILL         = "(%s de excesso)",
     FOOTER_WINDOW    = "janela de %ds",
     FOOTER_SAMPLE    = "(exemplo — /bdr)",
-    FOOTER_HINT      = "/bdr alternar",
     EMPTY            = "Sem dados de resumo para esta morte.",
     UNKNOWN          = "Desconhecido",
     ENV_DROWNING     = "Afogamento",
@@ -316,7 +324,6 @@ local L_itIT = setmetatable({
     OVERKILL         = "(%s in eccesso)",
     FOOTER_WINDOW    = "finestra di %ds",
     FOOTER_SAMPLE    = "(esempio — /bdr)",
-    FOOTER_HINT      = "/bdr alterna",
     EMPTY            = "Nessun dato di riepilogo per questa morte.",
     UNKNOWN          = "Sconosciuto",
     ENV_DROWNING     = "Annegamento",

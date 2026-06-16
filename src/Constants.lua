@@ -14,9 +14,12 @@ BDR.CONFIG = {
     -- seconds is treated as the boundary of the fight that actually killed you.
     FIGHT_GAP_SECONDS = 10,
 
-    -- Title-bar scale slider bounds (1.0 == the window's native size).
-    SCALE_MIN = 0.9,
-    SCALE_MAX = 2.0,
+    -- Title-bar scale slider. The slider shows 0.9–2.0; the value is MULTIPLIED by
+    -- SCALE_BASE before being applied, so the comfortable baseline (slider 1.0)
+    -- renders at 1.3× — i.e. "1.0 on the slider" == the old 1.3 size.
+    SCALE_MIN  = 0.9,
+    SCALE_MAX  = 2.0,
+    SCALE_BASE = 1.3,
 }
 
 -- ── Chat colour escapes ─────────────────────────────────────────────────────
@@ -32,7 +35,7 @@ BDR.COLOR = {
 -- "Dragonflight-era" theme from PLAN.md / DESIGN: near-black bg, gold accents,
 -- red damage, green heal, blue absorb. (Hex values noted per token.)
 BDR.UI = {
-    BG          = { 0.039, 0.039, 0.051, 0.96 },  -- frame background  (#0A0A0D)
+    BG          = { 0.039, 0.039, 0.051, 0.70 },  -- frame background  (#0A0A0D, alpha 0.7)
     GOLD        = { 0.784, 0.635, 0.353, 1.00 },  -- borders / headers / separators (#C8A25A)
     BORDER_GOLD = { 0.784, 0.635, 0.353, 1.00 },  -- (alias of GOLD, used by backdrop)
     BORDER_GRAY = { 0.420, 0.420, 0.450, 1.00 },  -- frame edge + header divider (gray)
@@ -63,10 +66,21 @@ BDR.UI = {
     ABSORB_BLUE  = { 0.325, 0.659, 1.000 },  -- absorb shield overlay
     HEAL_GREEN   = { 0.278, 0.839, 0.420 },  -- heal markers
 
-    CANVAS_BG    = { 0.055, 0.055, 0.075, 1.00 },  -- graph canvas
-    ROW_ALT      = { 0.075, 0.075, 0.090, 1.00 },  -- alternating table row shade
+    -- One unified panel background shared by the graph canvas AND the table rows
+    -- (~15% darker than the old per-element darks), so they read as one surface.
+    PANEL_BG     = { 0.047, 0.047, 0.064, 1.00 },
+    CANVAS_BG    = { 0.055, 0.055, 0.075, 1.00 },  -- (kept; PANEL_BG is used now)
+    ROW_ALT      = { 0.075, 0.075, 0.090, 1.00 },  -- (kept; PANEL_BG is used now)
     ROW_KB_BG    = { 0.200, 0.055, 0.055, 1.00 },  -- killing-blow table row
 }
+
+-- Tombstone marker shown at the death point on the graph. We tried the brown
+-- `inv_misc_coffin_01` texture but it rendered blank in the live client, so this
+-- skull icon is the guaranteed-present fallback. Swap the path here to use a
+-- different texture; a wrong/missing path renders blank rather than erroring.
+BDR.DEATH_ICON      = "Interface\\Icons\\INV_Misc_Bone_HumanSkull_01"
+-- Size (px) of the tombstone marker on the graph x-axis. Change here to resize.
+BDR.DEATH_ICON_SIZE = 18
 
 -- ── Environmental death labels ──────────────────────────────────────────────
 -- Blizzard exposes environmental deaths with sentinel (negative) spellIDs and a
@@ -81,6 +95,20 @@ BDR.ENVIRONMENT = {
     [-5] = "ENV_FIRE",
     [-6] = "ENV_LAVA",
     [-7] = "ENV_SLIME",
+}
+
+-- Environmental deaths have NO spell (so no spell icon), but Blizzard still shows
+-- a representative icon. We map each environmental type (the UPPERCASED CLEU token,
+-- e.g. "FALLING") to a stock icon. UNKNOWN is the catch-all. (Verify the texture
+-- paths in-game; a wrong path renders blank rather than erroring.)
+BDR.ENV_ICONS = {
+    DROWNING = "Interface\\Icons\\Spell_Shadow_DemonBreath",
+    FALLING  = "Interface\\Icons\\Spell_Magic_FeatherFall",
+    FATIGUE  = "Interface\\Icons\\Spell_Nature_Sleep",
+    FIRE     = "Interface\\Icons\\Spell_Fire_Fire",
+    LAVA     = "Interface\\Icons\\Spell_Fire_Volcano",
+    SLIME    = "Interface\\Icons\\Spell_Nature_CorrosiveBreath",
+    UNKNOWN  = "Interface\\Icons\\Ability_Creature_Cursed_05",
 }
 
 -- ── Damage-school colours (graph dots + tooltip school name) ─────────────────

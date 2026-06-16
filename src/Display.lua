@@ -26,30 +26,38 @@ local GRAPH_HDR  = 28          -- header+legend row height; clears the canvas to
 local GRAPH_H    = 152         -- HP-graph canvas height (the hero)
 local XAXIS_H    = 14
 local Y_AXIS_MIN   = -5        -- y-axis floor (%) so the death line isn't flush at the bottom
-local TAIL_SECONDS = 1.5       -- post-death padding (the dashed fading tail), in combat seconds
+local GRAPH_PAD    = 0.1       -- seconds of breathing room added BEFORE the first hit AND after death
 local TBL_HDR    = 16          -- table column-header row
 local ROW_H      = 18
 local ROW_GAP    = 1
 local SRC_HDR    = 16
 local SRC_ROW_H  = 18
 local SRC_TOTAL_H = 20
-local FOOTER_H   = 18
+local FOOTER_H   = 10          -- half-height footer; text vertically centred in the band
 
-local TL_VISIBLE_ROWS  = 6     -- combat-table viewport height (rows); the rest scrolls
+local TL_VISIBLE_ROWS  = 5     -- combat-table viewport height (rows); the rest scrolls
 local SRC_VISIBLE_ROWS = 5     -- damage-sources viewport height (rows); the rest scrolls
 local SCROLLBAR_W      = 22
 
--- Table column geometry (shared by the header and the rows).
-local C_TIME_X  = 6
-local C_TIME_W  = 38
-local C_ICON_W  = 16
-local C_NAME_X  = C_TIME_X + C_TIME_W + 2 + C_ICON_W + 6
-local C_PCT_PAD   = 6          -- "% Max HP" bar, inset from the row's right edge
-local C_PCT_BAR_W = 78         -- the big flat "% Max HP" bar (right of the number)
-local C_PCT_GAP   = 6          -- gap between the % number and the bar
-local C_PCT_NUM_W = 34         -- width of the "37%" number (sits LEFT of the bar)
-local C_DMG_W   = 60
-local C_TYPE_W  = 44
+-- Table column geometry. A borderless grid: every column LEFT-aligned at its own x.
+-- Columns: Time · [tombstone on the KB] · Event(icon+name) · Source · Damage ·
+-- Remaining Health (`NN%` right-aligned tight to a flat bar). Source is wide; the HP
+-- number sits close to its bar. The rightmost edge (HP bar end ≈509) clears the
+-- reserved scrollbar so nothing hides under it when the list overflows 5 rows.
+local C_TIME_X    = 6
+local C_TIME_W    = 46          -- "−16.000s" (3-decimal / millisecond precision)
+local C_DEATH_W   = 13          -- tombstone slot right of the time (KB row only)
+local C_ICON_W    = 16
+local C_ICON_X    = C_TIME_X + C_TIME_W + C_DEATH_W + 2      -- event spell icon
+local C_EVENT_X   = C_ICON_X + C_ICON_W + 4                  -- spell name, right of the icon
+local C_EVENT_W   = 100
+local C_SOURCE_X  = C_EVENT_X + C_EVENT_W + 6               -- attacker name (wide)
+local C_SOURCE_W  = 122
+local C_DMG_X     = C_SOURCE_X + C_SOURCE_W + 6            -- damage number (left-aligned)
+local C_DMG_W     = 58
+local C_HP_NUM_W  = 34          -- "100%", right-aligned tight to the bar
+local C_HP_BAR_X  = C_DMG_X + C_DMG_W + 12 + C_HP_NUM_W + 4  -- flat bar left edge
+local C_HP_BAR_W  = 80
 
 -- ── tiny helpers ─────────────────────────────────────────────────────────────
 
@@ -202,46 +210,55 @@ local function MakeFontString(parent, template, justify)
     return fs
 end
 
--- Restyle a UIPanelScrollFrameTemplate scrollbar to the modern Blizzard look:
--- thin, gray, a chunky (~60%) thumb and simple gray chevron arrows. Everything is
--- guarded so a missing piece degrades gracefully rather than erroring; the modern
--- chevron atlas is used only if the client actually has it.
+-- Does this atlas exist on the live client? (Used to pick the death marker's icon.)
 local function AtlasExists(name)
     return C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(name) ~= nil
 end
 
+-- Apply the death/grave marker to a texture: prefer the graveyard atlas (a
+-- tombstone, reliably present), else the BDR.DEATH_ICON texture path.
+local function ApplyDeathIcon(tex)
+    if tex.SetAtlas and AtlasExists("poi-graveyard-neutral") then
+        tex:SetAtlas("poi-graveyard-neutral")
+    else
+        tex:SetTexture(BDR.DEATH_ICON)
+    end
+end
+
+-- Restyle a UIPanelScrollFrameTemplate scrollbar to the MODERN retail look: a thin
+-- track, a chunky gray thumb, and small chevron up/down arrows (the minimal atlas
+-- when the client has it). Everything is guarded so a missing piece degrades
+-- gracefully. (ElvUI, if loaded, reskins on top of this.)
 local function StyleScrollbar(barName)
     local bar = _G[barName]
     if not bar then return end
     bar:SetWidth(8)
 
-    -- Thin gray thumb (~60% of a typical viewport).
     local thumb = (bar.GetThumbTexture and bar:GetThumbTexture()) or _G[barName .. "ThumbTexture"]
     if thumb then
-        thumb:SetColorTexture(0.50, 0.50, 0.53, 0.85)
-        thumb:SetSize(5, 64)
+        thumb:SetColorTexture(0.45, 0.45, 0.48, 0.9)
+        thumb:SetSize(5, 48)
     end
-
-    -- Drop the chunky default track art if it's present.
     for _, suffix in ipairs({ "Track", "Background", "Top", "Bottom", "Middle" }) do
         local t = _G[barName .. suffix]
         if t and t.SetAlpha then t:SetAlpha(0) end
     end
 
-    -- Simple gray chevron arrows (modern atlas when available; else tint the default).
     local function styleArrow(btn, atlas)
         if not btn then return end
-        btn:SetSize(14, 14)
+        btn:SetSize(12, 12)
         if btn.SetNormalAtlas and AtlasExists(atlas) then
             btn:SetNormalAtlas(atlas); btn:SetPushedAtlas(atlas); btn:SetDisabledAtlas(atlas)
         end
+        local function fit(tex) if tex then tex:ClearAllPoints(); tex:SetAllPoints(btn) end end
         local n = btn.GetNormalTexture and btn:GetNormalTexture()
         local p = btn.GetPushedTexture and btn:GetPushedTexture()
         local d = btn.GetDisabledTexture and btn:GetDisabledTexture()
         local h = btn.GetHighlightTexture and btn:GetHighlightTexture()
-        if n then n:SetVertexColor(0.62, 0.62, 0.66) end
-        if p then p:SetVertexColor(0.85, 0.85, 0.90) end
-        if d then d:SetVertexColor(0.32, 0.32, 0.34) end
+        fit(n); fit(p); fit(d); fit(h)
+        if n then n:SetVertexColor(0.6, 0.6, 0.64) end
+        if p then p:SetVertexColor(0.85, 0.85, 0.9) end
+        if d then d:SetVertexColor(0.3, 0.3, 0.32) end
         if h then h:SetAlpha(0) end
     end
     styleArrow(_G[barName .. "ScrollUpButton"],   "minimal-scrollbar-arrow-top")
@@ -251,14 +268,16 @@ end
 -- Apply a new window scale (buttons commit immediately), persist + refresh label.
 local function SetWindowScale(v)
     v = math.max(BDR.CONFIG.SCALE_MIN, math.min(BDR.CONFIG.SCALE_MAX, math.floor(v * 10 + 0.5) / 10))
-    BDR.DB.scale = v
-    F:SetScale(v)
+    BDR.DB.scale = v                       -- the displayed slider value (1.0 = baseline)
+    F:SetScale(v * BDR.CONFIG.SCALE_BASE)   -- actual frame scale (baseline is 1.3×)
 end
 
 -- ── Continuous cursor-tracking tooltip (the graph's "foolproof" hover) ───────
 -- A transparent overlay over the graph; its OnUpdate maps the cursor X to a time,
 -- finds the nearest hit, and shows a tooltip that follows the cursor with no dead
 -- zones. F.mapT (set by RenderGraph) holds the time/HP mapping + the hit list.
+
+local RenderGraph   -- forward declaration (GraphTrack re-renders the graph while panning)
 
 local function GraphTrackStop()
     if not (F and F.tracking) then return end
@@ -271,6 +290,23 @@ end
 local function GraphTrack(overlay)
     local m = F and F.mapT
     if not m then return end
+
+    if overlay.movingWindow then return end   -- dragging the whole window: no tooltip/scrub
+
+    -- Drag-to-pan the zoomed window (continues even if the cursor leaves the graph).
+    if overlay.panning then
+        local cur  = GetCursorPosition() / overlay:GetEffectiveScale()
+        local span = overlay.panSpan
+        local dt   = -(cur - overlay.panStartX) / m.gw * span   -- drag right → earlier times
+        local newMin = overlay.panStartMin + dt
+        if newMin < m.fullMin then newMin = m.fullMin end
+        if newMin + span > m.fullMax then newMin = m.fullMax - span end
+        if newMin < m.fullMin then newMin = m.fullMin end
+        F.zoomMin, F.zoomMax = newMin, newMin + span
+        if RenderGraph then RenderGraph(F.report) end
+        return
+    end
+
     if not overlay:IsMouseOver() then GraphTrackStop(); return end
     F.tracking = true
 
@@ -278,14 +314,13 @@ local function GraphTrack(overlay)
     local gx = (GetCursorPosition() / scale) - F.graph:GetLeft()
     if gx < 0 then gx = 0 elseif gx > m.gw then gx = m.gw end
 
-    local combatT = gx / m.gw * m.xMax
-    local relT = combatT + m.first              -- back to relative-to-death seconds
+    local relT = gx / m.gw * m.span + m.xMinT   -- cursor X → relative-to-death seconds
     if relT > 0 then relT = 0 end
 
     -- Nearest hit by X-axis proximity.
     local nearest, nd
     for _, ev in ipairs(m.hits) do
-        local ex = (ev.t - m.first) / m.xMax * m.gw
+        local ex = (ev.t - m.xMinT) / m.span * m.gw
         local d = math.abs(ex - gx)
         if not nd or d < nd then nd, nearest = d, ev end
     end
@@ -295,7 +330,7 @@ local function GraphTrack(overlay)
     F.graphHL:SetPoint("BOTTOMLEFT", F.graph, "BOTTOMLEFT", gx - 0.5, 0)
     F.graphHL:SetSize(1, m.gh); F.graphHL:Show()
 
-    local hp = StepPctAt(m.curve, relT)
+    local hp = StepPctAt(m.curve, relT)   -- stepped, to match the stepped line
     local onHit = nearest and nd <= 14
     local newRow = (onHit and F.rowOf) and F.rowOf[nearest] or nil
     if F.trackRow and F.trackRow ~= newRow then F.trackRow.hl:Hide(); F.trackRow = nil end
@@ -313,31 +348,38 @@ local function GraphTrack(overlay)
         F.markerGlow:Hide()
     end
 
+    -- On a dot, report the hit's OWN time/HP (its pre-hit currentHP — e.g. the KB's
+    -- real ~2%, not the 0% at death); off a dot, report the cursor's stepped HP.
+    local hpR = math.floor(((onHit and (nearest.hpPct or StepPctAt(m.curve, nearest.t))) or hp) + 0.5)
     GameTooltip:SetOwner(overlay, "ANCHOR_CURSOR_RIGHT")
-    GameTooltip:AddLine(string.format("%.1fs into combat", combatT), 1, 1, 1)
-    local hc = (hp > 50 and BDR.UI.HP_GOOD) or (hp >= 25 and BDR.UI.HP_MID) or BDR.UI.HP_LOW
-    GameTooltip:AddLine(string.format("%d%% HP remaining", math.floor(hp + 0.5)), hc[1], hc[2], hc[3])
+    -- Minimal line (default yellow): the killing blow gets its own callout, every
+    -- other point shows seconds-before-death + HP. (NOT "seconds into combat".)
+    if onHit and nearest.isKillingBlow then
+        GameTooltip:AddLine(L.TIP_KB_AT:format(hpR), 1, 0.82, 0)
+    elseif onHit then
+        GameTooltip:AddLine(L.TIP_BEFORE_DEATH:format(-nearest.t, hpR), 1, 0.82, 0)
+    else
+        GameTooltip:AddLine(L.TIP_BEFORE_DEATH:format(-relT, hpR), 1, 0.82, 0)
+    end
+    -- Hovering a dot expands to the hit detail: icon+spell, then Source/School/Hit/Hit%.
     if onHit then
         local isHeal = nearest.kind == "heal"
         local dc = isHeal and BDR.UI.HEAL or BDR.UI.DAMAGE
         GameTooltip:AddLine(" ")
-        GameTooltip:AddLine(SpellNameAt(nearest), BDR.UI.TEXT[1], BDR.UI.TEXT[2], BDR.UI.TEXT[3])
-        GameTooltip:AddDoubleLine(L.TIP_SOURCE, nearest.sourceName or L.UNKNOWN,
+        local icon = SpellIcon(nearest.spellID) or nearest.iconOverride
+        local nameLine = SpellNameAt(nearest)
+        if icon then nameLine = string.format("|T%s:16:16|t %s", icon, nameLine) end
+        GameTooltip:AddLine(nameLine, BDR.UI.TEXT[1], BDR.UI.TEXT[2], BDR.UI.TEXT[3])
+        GameTooltip:AddDoubleLine(L.TIP_SOURCE .. ":", nearest.sourceName or L.UNKNOWN,
             0.7, 0.7, 0.7, 0.95, 0.95, 0.95)
-        GameTooltip:AddDoubleLine(isHeal and L.TYPE_HEAL or L.TYPE_HIT,
-            (isHeal and "+" or "-") .. FormatAmount(nearest.amount), 0.7, 0.7, 0.7, dc[1], dc[2], dc[3])
         local _, schoolName = SchoolInfo(nearest.school)
-        if schoolName ~= "" then
-            GameTooltip:AddDoubleLine(L.TIP_SCHOOL, schoolName, 0.7, 0.7, 0.7, 0.95, 0.95, 0.95)
-        end
+        GameTooltip:AddDoubleLine(L.TIP_SCHOOL .. ":", (schoolName ~= "" and schoolName) or "—",
+            0.7, 0.7, 0.7, 0.95, 0.95, 0.95)
+        GameTooltip:AddDoubleLine(L.TYPE_HIT .. ":", (isHeal and "+" or "-") .. FormatFull(nearest.amount),
+            0.7, 0.7, 0.7, dc[1], dc[2], dc[3])
         local b, a = HpStep(m.curve, nearest.t)
-        local delta = a - b
-        local dcol = (delta < 0) and BDR.UI.DAMAGE or BDR.UI.HEAL
-        GameTooltip:AddDoubleLine(L.TIP_HP_CHANGE, string.format("%+.1f%%", delta),
-            0.7, 0.7, 0.7, dcol[1], dcol[2], dcol[3])
-        if nearest.isKillingBlow or (nearest.overkill and nearest.overkill > 0) then
-            GameTooltip:AddLine(L.KILLING_BLOW, BDR.UI.DAMAGE[1], BDR.UI.DAMAGE[2], BDR.UI.DAMAGE[3])
-        end
+        GameTooltip:AddDoubleLine(L.TIP_HIT_PCT .. ":", string.format("%+.1f%%", a - b),
+            0.7, 0.7, 0.7, dc[1], dc[2], dc[3])
     end
     GameTooltip:Show()
 end
@@ -351,18 +393,19 @@ local function BuildFrame()
 
     -- Background drawn by the backdrop itself (bgFile), clipped inside the border
     -- insets — a separate full-rect texture used to poke past the rounded corners.
+    -- Square frame: a 1px straight border (no rounded tooltip edge — sharp corners).
     f:SetBackdrop({
         bgFile   = "Interface\\Buttons\\WHITE8x8",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        edgeSize = 14,
-        insets   = { left = 4, right = 4, top = 4, bottom = 4 },
+        edgeFile = "Interface\\Buttons\\WHITE8x8",
+        edgeSize = 1,
+        insets   = { left = 1, right = 1, top = 1, bottom = 1 },
     })
     f:SetBackdropColor(unpack(BDR.UI.BG))
     f:SetBackdropBorderColor(unpack(BDR.UI.BORDER_GRAY))
 
     local p = BDR.DB.point
     f:SetPoint(p[1], UIParent, p[3], p[4], p[5])
-    f:SetScale(BDR.DB.scale or 1.0)
+    f:SetScale((BDR.DB.scale or 1.0) * BDR.CONFIG.SCALE_BASE)
 
     f:SetMovable(true)
     f:RegisterForDrag("LeftButton")
@@ -382,24 +425,40 @@ local function BuildFrame()
     headerLine:SetPoint("BOTTOMRIGHT", headerBg, "BOTTOMRIGHT", 0, 0)
     headerLine:SetHeight(1)
 
-    -- Centred title: "Better" red, "DeathRecap" primary text.
-    local title = MakeFontString(f, "GameFontNormalLarge", "CENTER")
-    title:SetPoint("TOPLEFT", headerBg, "TOPLEFT", 0, 0)
-    title:SetPoint("BOTTOMRIGHT", headerBg, "BOTTOMRIGHT", 0, 0)
-    title:SetJustifyH("CENTER")
+    -- Left-aligned title (per DESIGN.png): "Better" red, "DeathRecap" primary text.
+    local title = MakeFontString(f, "GameFontNormalLarge", "LEFT")
+    title:SetPoint("LEFT", headerBg, "LEFT", 10, 0)
+    title:SetJustifyH("LEFT")
     title:SetJustifyV("MIDDLE")
     title:SetText(ColorOf(BDR.UI.DAMAGE) .. "Better|r" .. ColorOf(BDR.UI.TEXT) .. "DeathRecap|r")
 
-    -- Right side: the standard WoW close button, then a scale slider whose thumb
-    -- shows the value:  Scale: [    [1.0]    ].  The window only rescales on release.
+    -- Right side: the STANDARD WoW close button (`UIPanelCloseButton`) so ElvUI (and
+    -- other skins) restyle it like Blizzard's own — a plain white "×" that picks up
+    -- the skin's hover colour. Vertically centred in the header like the title.
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-    close:SetSize(26, 26)
-    close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -3, -3)
+    close:SetPoint("RIGHT", headerBg, "RIGHT", -2, 0)
     close:SetScript("OnClick", function() f:Hide() end)
+    -- The "×" is the legacy UIPanelCloseButton, which ElvUI does NOT auto-skin on a
+    -- custom frame — so re-skin it ourselves via ElvUI's own Skins module if present
+    -- (soft, dependency-free, pcall-guarded). No-op when ElvUI isn't loaded.
+    if _G.ElvUI then
+        pcall(function()
+            local E = unpack(_G.ElvUI)
+            local S = E and E.GetModule and E:GetModule("Skins")
+            if S and S.HandleCloseButton then S:HandleCloseButton(close) end
+        end)
+    end
+    -- ElvUI's skin can re-anchor the button to the frame corner; pin it back to the
+    -- header's vertical centre so every header item shares one midline.
+    close:ClearAllPoints()
+    close:SetPoint("RIGHT", headerBg, "RIGHT", -2, 0)
 
+    -- Slider is anchored to the header (NOT chained off the close button) so it stays
+    -- vertically centred even if a skin moves the close button. -36 clears the ~32px
+    -- close button to its right.
     local scaleSlider = CreateFrame("Slider", nil, f)
     scaleSlider:SetSize(108, 14)
-    scaleSlider:SetPoint("RIGHT", close, "LEFT", -4, 0)
+    scaleSlider:SetPoint("RIGHT", headerBg, "RIGHT", -36, 0)
     scaleSlider:SetOrientation("HORIZONTAL")
     scaleSlider:SetMinMaxValues(BDR.CONFIG.SCALE_MIN, BDR.CONFIG.SCALE_MAX)
     scaleSlider:SetValueStep(0.1)
@@ -447,6 +506,8 @@ local function BuildFrame()
     bbBorder:SetColorTexture(0.45, 0.12, 0.12, 1)
     bbBorder:SetPoint("BOTTOMLEFT"); bbBorder:SetPoint("BOTTOMRIGHT"); bbBorder:SetHeight(1)
 
+    -- (No big right-side portrait model: a 3D model can render OVER the 2D
+    -- amount/overkill text. The SOURCE portrait is the small one over the icon below.)
     f.bannerIcon = banner:CreateTexture(nil, "ARTWORK")
     f.bannerIcon:SetSize(32, 32)
     f.bannerIcon:SetPoint("LEFT", 12, 0)
@@ -460,49 +521,62 @@ local function BuildFrame()
     ib:SetPoint("TOPLEFT", f.bannerIcon, "TOPLEFT", -2, 2)
     ib:SetPoint("BOTTOMRIGHT", f.bannerIcon, "BOTTOMRIGHT", 2, -2)
 
+    -- The "KILLED BY" icon represents the SOURCE: a creature's portrait (best-effort
+    -- model over the icon) for mob deaths, or the env icon / spell icon underneath.
+    f.bannerSourceModel = CreateFrame("PlayerModel", nil, banner)
+    f.bannerSourceModel:SetPoint("TOPLEFT", f.bannerIcon, "TOPLEFT", 0, 0)
+    f.bannerSourceModel:SetPoint("BOTTOMRIGHT", f.bannerIcon, "BOTTOMRIGHT", 0, 0)
+    f.bannerSourceModel:SetFrameLevel(banner:GetFrameLevel() + 3)
+    f.bannerSourceModel:Hide()
+
+    -- Left block: KILLED BY (top) + killer • spell (below). Its TOP is aligned with
+    -- the Damage number's top on the right (both at banner top -6); each carries a
+    -- second line stacked below.
+    -- Anchored to the banner top (not the icon) so its top edge matches the Damage
+    -- number's top on the right; x sits just past the 32px icon (12 + 32 + 12).
     f.bannerKilledBy = MakeFontString(banner, "GameFontDisableSmall", "LEFT")
-    f.bannerKilledBy:SetPoint("TOPLEFT", f.bannerIcon, "TOPRIGHT", 12, -4)
+    f.bannerKilledBy:SetPoint("TOPLEFT", banner, "TOPLEFT", 56, -6)
     f.bannerKilledBy:SetText(ColorOf(BDR.UI.DAMAGE) .. L.KILLED_BY .. "|r")
 
+    -- The killer • spell (left) and the overkill line (right) are BOTH bottom-anchored
+    -- to the banner so they share one baseline (Source/Spell aligned with overkill).
     f.bannerSource = MakeFontString(banner, "GameFontNormal", "LEFT")
-    f.bannerSource:SetPoint("BOTTOMLEFT", f.bannerIcon, "BOTTOMRIGHT", 12, 4)
+    f.bannerSource:SetPoint("BOTTOMLEFT", banner, "BOTTOMLEFT", 56, 7)
 
-    -- Hovering the killing-blow icon/name shows the real spell tooltip.
+    -- Right block: Damage (top) + overkill (bottom-aligned with killer • spell).
+    f.bannerAmount = MakeFontString(banner, "GameFontNormalLarge", "RIGHT")
+    f.bannerAmount:SetFont("Fonts\\FRIZQT__.TTF", 21, "")
+    f.bannerAmount:SetPoint("TOPRIGHT", banner, "TOPRIGHT", -10, -6)
+
+    f.bannerOver = MakeFontString(banner, "GameFontDisableSmall", "RIGHT")
+    f.bannerOver:SetPoint("BOTTOMRIGHT", banner, "BOTTOMRIGHT", -10, 7)
+
+    -- Hovering the killer • spell text shows the real spell tooltip, anchored above
+    -- the centre of that text (and only over it — like the table rows).
     f.bannerSpellBtn = CreateFrame("Button", nil, banner)
-    f.bannerSpellBtn:SetPoint("TOPLEFT", 4, -2)
-    f.bannerSpellBtn:SetPoint("BOTTOMLEFT", 4, 2)
-    f.bannerSpellBtn:SetWidth(320)
+    f.bannerSpellBtn:SetPoint("TOPLEFT", f.bannerSource, "TOPLEFT", -2, 2)
+    f.bannerSpellBtn:SetPoint("BOTTOMRIGHT", f.bannerSource, "BOTTOMRIGHT", 2, -2)
     f.bannerSpellBtn:SetFrameLevel(banner:GetFrameLevel() + 5)
     f.bannerSpellBtn:SetScript("OnEnter", function(self)
         if self.spellID and GameTooltip.SetSpellByID then
-            GameTooltip:SetOwner(self, "ANCHOR_BOTTOMLEFT")
+            GameTooltip:SetOwner(self, "ANCHOR_TOP")
             GameTooltip:SetSpellByID(self.spellID)
             GameTooltip:Show()
         end
     end)
     f.bannerSpellBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-    f.bannerAmount = MakeFontString(banner, "GameFontNormalLarge", "RIGHT")
-    f.bannerAmount:SetFont("Fonts\\FRIZQT__.TTF", 21, "")
-    f.bannerAmount:SetPoint("TOPRIGHT", banner, "TOPRIGHT", -10, -5)
-
-    f.bannerOver = MakeFontString(banner, "GameFontDisableSmall", "RIGHT")
-    f.bannerOver:SetPoint("BOTTOMRIGHT", banner, "BOTTOMRIGHT", -10, 6)
-
-    -- ── Graph header (label + legend) ────────────────────────────────────────────
+    -- ── Graph header (label only — the legend was redundant, removed) ────────────
     local yGraphHdr = yBanner - BANNER_H - HDR_GAP
     f.graphLabel = MakeFontString(f, "GameFontDisableSmall", "LEFT")
     f.graphLabel:SetPoint("TOPLEFT", PAD, yGraphHdr)
     f.graphLabel:SetTextColor(unpack(BDR.UI.TEXT_DIM))
 
-    f.graphLegend = MakeFontString(f, "GameFontDisableSmall", "RIGHT")
-    f.graphLegend:SetPoint("TOPRIGHT", -PAD, yGraphHdr)
-    f.graphLegend:SetText(table.concat({
-        ColorOf(BDR.UI.HEAL) .. "—|r " .. ColorOf(BDR.UI.TEXT_DIM) .. L.LEGEND_HEALTH .. "|r",
-        ColorOf(BDR.UI.ABSORB) .. "- -|r " .. ColorOf(BDR.UI.TEXT_DIM) .. L.LEGEND_ABSORB .. "|r",
-        ColorOf(BDR.UI.DAMAGE) .. "●|r " .. ColorOf(BDR.UI.TEXT_DIM) .. L.LEGEND_HIT .. "|r",
-        ColorOf(BDR.UI.HEAL) .. "▲|r " .. ColorOf(BDR.UI.TEXT_DIM) .. L.LEGEND_HEAL .. "|r",
-    }, "   "))
+    -- Interaction hint at the graph's top-right: scroll = zoom, drag = pan.
+    f.graphHint = MakeFontString(f, "GameFontDisableSmall", "RIGHT")
+    f.graphHint:SetPoint("TOPRIGHT", -PAD, yGraphHdr)
+    f.graphHint:SetTextColor(unpack(BDR.UI.TEXT_DIM))
+    f.graphHint:SetText(L.GRAPH_HINT:upper())
 
     -- ── Graph canvas ─────────────────────────────────────────────────────────────
     local yCanvas = yGraphHdr - GRAPH_HDR
@@ -510,46 +584,41 @@ local function BuildFrame()
     local graph = CreateFrame("Frame", nil, f)
     graph:SetPoint("TOPLEFT", PAD + GUTTER, yCanvas)
     graph:SetSize(graphW, GRAPH_H)
+    graph:SetClipsChildren(true)   -- so zoomed-out-of-range line/dots can't spill the canvas
     f.graph = graph
 
     local canvas = graph:CreateTexture(nil, "BACKGROUND")
     canvas:SetAllPoints()
-    canvas:SetColorTexture(unpack(BDR.UI.CANVAS_BG))
+    canvas:SetColorTexture(unpack(BDR.UI.PANEL_BG))
 
-    -- Y axis: 0–100% labels + low-opacity gridlines. HP maps into [Y_AXIS_MIN..100],
-    -- so 0% sits a touch above the bottom edge (the death line isn't flush).
+    -- Y axis: 0–100% labels only (gridlines removed — keep just the HP line). HP
+    -- maps into [Y_AXIS_MIN..100], so 0% sits a touch above the bottom edge. Labels
+    -- are children of `f` (anchored to the graph) so the graph's clip doesn't hide them.
     local function YPos(pct) return (pct - Y_AXIS_MIN) / (100 - Y_AXIS_MIN) * GRAPH_H end
-    for _, pct in ipairs({ 0, 20, 40, 60, 80, 100 }) do
-        local yy = YPos(pct)
-        local lbl = MakeFontString(graph, "GameFontDisableSmall", "RIGHT")
-        lbl:SetPoint("RIGHT", graph, "BOTTOMLEFT", -4, yy)
+    for _, pct in ipairs({ 0, 25, 50, 75, 100 }) do
+        local lbl = MakeFontString(f, "GameFontDisableSmall", "RIGHT")
+        lbl:SetPoint("RIGHT", graph, "BOTTOMLEFT", -4, YPos(pct))
         lbl:SetText(pct .. "%")
         lbl:SetTextColor(unpack(BDR.UI.TEXT_DIM))
-        local g = graph:CreateTexture(nil, "BACKGROUND", nil, 1)
-        g:SetColorTexture(1, 1, 1, 0.05)
-        g:SetPoint("BOTTOMLEFT", graph, "BOTTOMLEFT", 0, yy)
-        g:SetPoint("BOTTOMRIGHT", graph, "BOTTOMLEFT", graphW, yy)
-        g:SetHeight(1)
     end
 
-    f.graphFillPool = NewPool(function(parent) return parent:CreateTexture(nil, "ARTWORK", nil, 1) end)
     f.graphLinePool = NewPool(function(parent) return parent:CreateLine(nil, "OVERLAY") end)
 
     -- Post-death dashed fading tail (so the killing-blow dot isn't flush right).
     f.tailPool = NewPool(function(parent) return parent:CreateTexture(nil, "ARTWORK", nil, 2) end)
 
-    -- Event dots: a school-coloured fill inside a white outline; KB is bigger.
+    -- Event markers: a school-coloured DOT on the line (heals green), with a thin dark
+    -- ring so it reads against the curve; the KB dot is bigger. (`fill` is a solid
+    -- colour, not a spell icon — reverted to dots for a cleaner, consistent timeline.)
     f.dotPool = NewPool(function(parent)
         local d = CreateFrame("Frame", nil, parent)
         d:SetFrameLevel(parent:GetFrameLevel() + 4)
-        d.border = d:CreateTexture(nil, "ARTWORK", nil, 1)
-        d.border:SetTexture("Interface\\COMMON\\Indicator-Gray")
-        d.border:SetVertexColor(1, 1, 1, 1)
+        d.border = d:CreateTexture(nil, "ARTWORK", nil, 0)   -- dark ring behind the fill
+        d.border:SetColorTexture(0, 0, 0, 0.85)
         d.border:SetAllPoints()
-        d.fill = d:CreateTexture(nil, "OVERLAY", nil, 1)
-        d.fill:SetTexture("Interface\\COMMON\\Indicator-Gray")
-        d.fill:SetPoint("TOPLEFT", 2, -2)
-        d.fill:SetPoint("BOTTOMRIGHT", -2, 2)
+        d.fill = d:CreateTexture(nil, "ARTWORK", nil, 1)      -- the school-coloured dot, inset 1px
+        d.fill:SetPoint("TOPLEFT", 1, -1)
+        d.fill:SetPoint("BOTTOMRIGHT", -1, 1)
         return d
     end)
 
@@ -568,17 +637,30 @@ local function BuildFrame()
     f.graphNote:Hide()
     f.mapT = nil
 
-    -- X axis: whole-second labels (pooled) + 0.5s minor ticks (pooled).
+    -- X axis: seconds-before-death labels (pooled); no minor ticks (grid removed).
     f.xtickPool  = NewPool(function(parent)
         local fs = MakeFontString(parent, "GameFontDisableSmall", "CENTER")
         fs:SetTextColor(unpack(BDR.UI.TEXT_DIM))
         return fs
     end)
-    f.xminorPool = NewPool(function(parent)
-        local t = parent:CreateTexture(nil, "ARTWORK", nil, 0)
-        t:SetColorTexture(1, 1, 1, 0.08)
-        return t
+
+    -- Death marker at the death point on the x-axis (in place of a "DEATH" label).
+    -- Prefer Blizzard's graveyard/tombstone atlas (a grave marker, reliably present);
+    -- fall back to the `BDR.DEATH_ICON` texture if the atlas is missing. Hover names
+    -- the moment of death.
+    f.deathMarker = CreateFrame("Frame", nil, f)   -- on `f` (not graph) so the clip won't hide it
+    f.deathMarker:SetSize(BDR.DEATH_ICON_SIZE, BDR.DEATH_ICON_SIZE)
+    f.deathMarker:EnableMouse(true)
+    f.deathMarker.tex = f.deathMarker:CreateTexture(nil, "OVERLAY")
+    f.deathMarker.tex:SetAllPoints()
+    ApplyDeathIcon(f.deathMarker.tex)
+    f.deathMarker:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine(L.AXIS_DEATH:upper(), BDR.UI.DAMAGE[1], BDR.UI.DAMAGE[2], BDR.UI.DAMAGE[3])
+        GameTooltip:Show()
     end)
+    f.deathMarker:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    f.deathMarker:Hide()
 
     -- Transparent overlay drives the continuous cursor-tracking tooltip (GraphTrack).
     f.graphOverlay = CreateFrame("Frame", nil, graph)
@@ -590,16 +672,16 @@ local function BuildFrame()
     f.tableTop = nil  -- set in ResolveLayout()
     local function MakeHdr(justify) local fs = MakeFontString(f, "GameFontDisableSmall", justify)
         fs:SetTextColor(unpack(BDR.UI.TEXT_DIM)); return fs end
-    f.hdrTime    = MakeHdr("LEFT")
-    f.hdrAbility = MakeHdr("LEFT")
-    f.hdrType    = MakeHdr("CENTER")
-    f.hdrAmount  = MakeHdr("RIGHT")
-    f.hdrPct     = MakeHdr("RIGHT")
+    f.hdrTime   = MakeHdr("LEFT")
+    f.hdrEvent  = MakeHdr("LEFT")
+    f.hdrSource = MakeHdr("LEFT")
+    f.hdrDamage = MakeHdr("LEFT")
+    f.hdrPct    = MakeHdr("LEFT")
     f.hdrTime:SetText(L.TBL_TIME)
-    f.hdrAbility:SetText(L.TBL_ABILITY)
-    f.hdrType:SetText(L.TBL_TYPE)
-    f.hdrAmount:SetText(L.TBL_AMOUNT)
-    f.hdrPct:SetText(L.TBL_PCTHP)
+    f.hdrEvent:SetText(L.TBL_EVENT)
+    f.hdrSource:SetText(L.TBL_SOURCE)
+    f.hdrDamage:SetText(L.TBL_DAMAGE)
+    f.hdrPct:SetText(L.TBL_REMAINING)
 
     local scroll = CreateFrame("ScrollFrame", "BetterDeathRecapTableScroll", f, "UIPanelScrollFrameTemplate")
     f.tableScroll = scroll
@@ -624,35 +706,50 @@ local function BuildFrame()
         row.hl:SetAllPoints()
         row.hl:SetColorTexture(BDR.UI.GOLD[1], BDR.UI.GOLD[2], BDR.UI.GOLD[3], 0.16)
         row.hl:Hide()
-        row.accent = row:CreateTexture(nil, "ARTWORK")     -- left type-accent bar
-        row.accent:SetPoint("TOPLEFT"); row.accent:SetPoint("BOTTOMLEFT"); row.accent:SetWidth(2)
+        -- Every column is LEFT-aligned at its own x; all text truncates in-row
+        -- (SetWordWrap false) rather than wrapping to a second line.
         row.time = MakeFontString(row, "GameFontDisableSmall", "LEFT")
-        row.time:SetPoint("LEFT", C_TIME_X, 0); row.time:SetWidth(C_TIME_W)
+        row.time:SetPoint("LEFT", C_TIME_X, 0); row.time:SetWidth(C_TIME_W); row.time:SetWordWrap(false)
+        -- Coffin marker right of the time (snug after "0.0s", not crowding the Event
+        -- column), shown ONLY on the killing-blow row.
+        row.deathIcon = row:CreateTexture(nil, "ARTWORK")
+        row.deathIcon:SetSize(C_DEATH_W, C_DEATH_W)
+        row.deathIcon:SetPoint("LEFT", row, "LEFT", C_TIME_X + C_TIME_W - 6, 0)
+        ApplyDeathIcon(row.deathIcon)
+        row.deathIcon:Hide()
+        -- Event: spell icon + name.
         row.icon = row:CreateTexture(nil, "ARTWORK")
         row.icon:SetSize(C_ICON_W, C_ICON_W)
-        row.icon:SetPoint("LEFT", row.time, "RIGHT", 2, 0)
+        row.icon:SetPoint("LEFT", row, "LEFT", C_ICON_X, 0)
         row.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
         row.text = MakeFontString(row, "GameFontHighlightSmall", "LEFT")
-        row.text:SetPoint("LEFT", row, "LEFT", C_NAME_X, 0)
-        -- "% Max HP": a big flat bar at the right edge, the number to its LEFT.
-        row.pctBarBg = row:CreateTexture(nil, "ARTWORK", nil, 0)  -- bar track
+        row.text:SetPoint("LEFT", row, "LEFT", C_EVENT_X, 0); row.text:SetWidth(C_EVENT_W)
+        row.text:SetWordWrap(false)
+        -- Source: the attacker name.
+        row.source = MakeFontString(row, "GameFontHighlightSmall", "LEFT")
+        row.source:SetPoint("LEFT", row, "LEFT", C_SOURCE_X, 0); row.source:SetWidth(C_SOURCE_W)
+        row.source:SetWordWrap(false)
+        -- Damage: the number, left-aligned.
+        row.dmg = MakeFontString(row, "GameFontHighlightSmall", "LEFT")
+        row.dmg:SetPoint("LEFT", row, "LEFT", C_DMG_X, 0); row.dmg:SetWidth(C_DMG_W); row.dmg:SetWordWrap(false)
+        -- Remaining HP: a flat bar with the % number right-aligned tight to its left.
+        row.pctBarBg = row:CreateTexture(nil, "ARTWORK", nil, 0)  -- fat bar track (covers the row)
         row.pctBarBg:SetColorTexture(0.18, 0.10, 0.10, 1)
-        row.pctBarBg:SetHeight(10)
-        row.pctBarBg:SetPoint("RIGHT", -C_PCT_PAD, 0)
-        row.pctBarBg:SetWidth(C_PCT_BAR_W)
-        row.pctBar = row:CreateTexture(nil, "ARTWORK", nil, 1)    -- fill, width ∝ share of max HP
-        row.pctBar:SetHeight(10)
+        row.pctBarBg:SetHeight(ROW_H - 4)
+        row.pctBarBg:SetPoint("LEFT", row, "LEFT", C_HP_BAR_X, 0)
+        row.pctBarBg:SetWidth(C_HP_BAR_W)
+        row.pctBar = row:CreateTexture(nil, "ARTWORK", nil, 1)    -- fill, width ∝ HP%
+        row.pctBar:SetHeight(ROW_H - 4)
         row.pctBar:SetPoint("LEFT", row.pctBarBg, "LEFT", 0, 0)
-        row.pct = MakeFontString(row, "GameFontDisableSmall", "RIGHT")
-        row.pct:SetPoint("RIGHT", row.pctBarBg, "LEFT", -C_PCT_GAP, 0); row.pct:SetWidth(C_PCT_NUM_W)
-        row.dmg = MakeFontString(row, "GameFontHighlightSmall", "RIGHT")
-        row.dmg:SetPoint("RIGHT", row.pct, "LEFT", -8, 0); row.dmg:SetWidth(C_DMG_W)
-        row.typeBg = row:CreateTexture(nil, "ARTWORK")
-        row.typeBg:SetPoint("RIGHT", row.dmg, "LEFT", -12, 0)
-        row.typeBg:SetSize(C_TYPE_W, 14)
-        row.typeTxt = MakeFontString(row, "GameFontDisableSmall", "CENTER")
-        row.typeTxt:SetPoint("CENTER", row.typeBg, "CENTER", 0, 0)
-        row.text:SetPoint("RIGHT", row.typeBg, "LEFT", -8, 0)
+        row.pct = MakeFontString(row, "GameFontHighlightSmall", "RIGHT")
+        row.pct:SetPoint("RIGHT", row.pctBarBg, "LEFT", -4, 0); row.pct:SetWidth(C_HP_NUM_W)
+        row.pct:SetWordWrap(false)
+        -- Event hover zone (icon + spell name): shows the SPELL tooltip; the rest of
+        -- the row shows the Time/Damage/HP tooltip (see RenderTable).
+        row.eventBtn = CreateFrame("Button", nil, row)
+        row.eventBtn:SetPoint("TOPLEFT", row, "TOPLEFT", C_ICON_X, 0)
+        row.eventBtn:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", C_ICON_X, 0)
+        row.eventBtn:SetWidth(C_SOURCE_X - C_ICON_X)
         return row
     end)
 
@@ -691,33 +788,53 @@ local function BuildFrame()
     end)
     StyleScrollbar("BetterDeathRecapSrcScrollScrollBar")
 
+    -- Meter-style row: a FAT bar covers the whole row; the source icon, name, and
+    -- raw total sit ON TOP of it (Details/Recount look).
     f.srcRowPool = NewPool(function(parent)
         local row = CreateFrame("Frame", nil, parent)
         row:SetHeight(SRC_ROW_H)
+        row.barBg = row:CreateTexture(nil, "BACKGROUND")              -- full-row track
+        row.barBg:SetColorTexture(0.16, 0.09, 0.09, 1)
+        row.barBg:SetPoint("TOPLEFT", 0, -1)
+        row.barBg:SetPoint("BOTTOMRIGHT", 0, 1)
+        row.barFill = row:CreateTexture(nil, "BACKGROUND", nil, 1)    -- fill, width ∝ share
+        row.barFill:SetPoint("TOPLEFT", row.barBg, "TOPLEFT", 0, 0)
+        row.barFill:SetPoint("BOTTOMLEFT", row.barBg, "BOTTOMLEFT", 0, 0)
         row.icon = row:CreateTexture(nil, "ARTWORK")
-        row.icon:SetSize(14, 14)
-        row.icon:SetPoint("LEFT", 0, 0)
+        row.icon:SetSize(SRC_ROW_H - 4, SRC_ROW_H - 4)
+        row.icon:SetPoint("LEFT", 2, 0)
         row.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+        -- Source PORTRAIT (a frozen creature model over the icon; spell/env icon shows
+        -- underneath as a fallback). Set in RenderSources from the source's GUID.
+        row.portrait = CreateFrame("PlayerModel", nil, row)
+        row.portrait:SetPoint("TOPLEFT", row.icon, "TOPLEFT", 0, 0)
+        row.portrait:SetPoint("BOTTOMRIGHT", row.icon, "BOTTOMRIGHT", 0, 0)
+        row.portrait:SetFrameLevel(row:GetFrameLevel() + 2)
+        row.portrait:Hide()
+        row.amount = MakeFontString(row, "GameFontHighlightSmall", "RIGHT")
+        row.amount:SetPoint("RIGHT", -6, 0); row.amount:SetWidth(82)
         row.name = MakeFontString(row, "GameFontHighlightSmall", "LEFT")
-        row.name:SetPoint("LEFT", row.icon, "RIGHT", 5, 0); row.name:SetWidth(120)
-        row.amount = MakeFontString(row, "GameFontDisableSmall", "RIGHT")
-        row.amount:SetPoint("RIGHT", 0, 0); row.amount:SetWidth(64)
-        row.pct = MakeFontString(row, "GameFontHighlightSmall", "RIGHT")
-        row.pct:SetPoint("RIGHT", row.amount, "LEFT", -10, 0); row.pct:SetWidth(44)
-        row.barBg = row:CreateTexture(nil, "ARTWORK", nil, 0)   -- bigger flat bar
-        row.barBg:SetColorTexture(0.18, 0.10, 0.10, 1)
-        row.barBg:SetHeight(10)
-        row.barBg:SetPoint("LEFT", row.name, "RIGHT", 8, 0)
-        row.barBg:SetPoint("RIGHT", row.pct, "LEFT", -10, 0)
-        row.barFill = row:CreateTexture(nil, "ARTWORK", nil, 1)
-        row.barFill:SetPoint("LEFT", row.barBg, "LEFT", 0, 0)
-        row.barFill:SetHeight(10)
+        row.name:SetPoint("LEFT", row.icon, "RIGHT", 5, 0)
+        row.name:SetPoint("RIGHT", row.amount, "LEFT", -8, 0)
+        row.name:SetJustifyH("LEFT"); row.name:SetWordWrap(false)
         return row
     end)
-    f.srcTotalLabel = MakeFontString(f, "GameFontHighlightSmall", "CENTER")
-    f.srcTotalAmount = MakeFontString(f, "GameFontHighlightSmall", "RIGHT")
-    f.srcTotalPct = MakeFontString(f, "GameFontHighlightSmall", "RIGHT")
-    f.srcTotalPct:SetTextColor(unpack(BDR.UI.TEXT_DIM))
+    -- Total Damage line doubles as the collapse/expand toggle for the sources list
+    -- (no ▶/▼ icon — a hover tooltip explains the click instead).
+    f.srcTotalBtn = CreateFrame("Button", nil, f)
+    f.srcTotalBtn:SetHeight(SRC_TOTAL_H)
+    f.srcTotalLabel = MakeFontString(f.srcTotalBtn, "GameFontHighlightSmall", "CENTER")
+    f.srcTotalLabel:SetPoint("CENTER", f.srcTotalBtn, "CENTER", 0, 0)
+    f.srcTotalBtn:SetScript("OnClick", function()
+        BDR.DB.sourcesCollapsed = not BDR.DB.sourcesCollapsed
+        if F.report then Display:Show(F.report) end
+    end)
+    f.srcTotalBtn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine(BDR.DB.sourcesCollapsed and L.SRC_EXPAND or L.SRC_COLLAPSE, 1, 0.82, 0)
+        GameTooltip:Show()
+    end)
+    f.srcTotalBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     -- ── Footer ─────────────────────────────────────────────────────────────────
     f.footer = MakeFontString(f, "GameFontDisableSmall", "LEFT")
@@ -741,7 +858,7 @@ end
 local function GraphX(t)
     local m = F.mapT
     if not m then return 0 end
-    return math.max(0, math.min(m.gw, (t - m.first) / m.xMax * m.gw))
+    return math.max(0, math.min(m.gw, (t - m.xMinT) / m.span * m.gw))
 end
 
 -- Highlight an event everywhere: vertical line on the curve, a gold glow on its
@@ -774,10 +891,38 @@ end
 
 -- ── rendering ────────────────────────────────────────────────────────────────
 
+-- Best-effort creature portrait. The recap event's sourceGUID encodes the
+-- creatureID (Creature-0-server-instance-zone-ID-spawn); we feed it to a model.
+-- Many deaths give no usable creatureID (environmental, players, missing GUID) —
+-- the model stays hidden then. All model calls are pcall-guarded so a model API
+-- mismatch can never error the report.
+local function SetCreatureModel(model, guid)
+    if not model then return end
+    local npcID
+    if type(guid) == "string" then
+        local unitType, _, _, _, _, id = strsplit("-", guid)
+        if (unitType == "Creature" or unitType == "Vehicle") and id then
+            npcID = tonumber(id)
+        end
+    end
+    if not npcID then model:Hide(); return end
+    local ok = pcall(function()
+        model:ClearModel()
+        model:SetCreature(npcID)
+        model:SetPortraitZoom(0.9)
+        model:SetCamDistanceScale(1.0)
+        -- Freeze to a STATIC portrait (no idle animation — we just want the face).
+        if model.FreezeAnimation then model:FreezeAnimation(0, 0, 0)
+        elseif model.SetAnimation then model:SetAnimation(0, 0) end
+    end)
+    if ok then model:Show() else model:Hide() end
+end
+
 local function RenderBanner(report)
     local kb = report.killingBlow
     if not kb then
         F.bannerIcon:Hide()
+        SetCreatureModel(F.bannerSourceModel, nil)
         F.bannerSpellBtn.spellID = nil
         F.bannerKilledBy:SetText(ColorOf(BDR.UI.DAMAGE) .. L.KILLED_BY .. "|r")
         F.bannerSource:SetText("|cff999999" .. L.BANNER_UNKNOWN .. "|r")
@@ -785,38 +930,50 @@ local function RenderBanner(report)
         F.bannerOver:SetText("")
         return
     end
-    local icon = SpellIcon(kb.spellID)
-    F.bannerIcon:SetTexture(icon or "Interface\\Icons\\Ability_Creature_Cursed_05")
+    -- The "KILLED BY" icon shows the SOURCE, not the spell: environmental → its
+    -- stock icon; a creature → its portrait (model over the icon); the spell icon
+    -- shows underneath as a fallback when no creature portrait is available.
+    if kb.isEnv then
+        F.bannerIcon:SetTexture(kb.iconOverride or "Interface\\Icons\\Ability_Creature_Cursed_05")
+        SetCreatureModel(F.bannerSourceModel, nil)
+    else
+        F.bannerIcon:SetTexture(SpellIcon(kb.spellID) or "Interface\\Icons\\Ability_Creature_Cursed_05")
+        SetCreatureModel(F.bannerSourceModel, kb.sourceGUID)  -- source portrait over the icon
+    end
     F.bannerIcon:Show()
-    F.bannerSpellBtn.spellID = kb.spellID  -- drives the spell tooltip on hover
+    F.bannerSpellBtn.spellID = kb.spellID              -- drives the spell tooltip on hover
 
     F.bannerKilledBy:SetText(ColorOf(BDR.UI.DAMAGE) .. L.KILLED_BY .. "|r")
-    -- Only show the "• <spell>" segment for an actual spell (melee blows have no ID).
-    local spellName = kb.spellID and SpellNameAt(kb) or kb.spellName
-    local spell = spellName and ("  " .. ColorOf(BDR.UI.TEXT_DIM) .. "•|r  "
-        .. ColorOf(BDR.UI.TEXT) .. spellName .. "|r") or ""
-    F.bannerSource:SetText(ColorOf(BDR.UI.NAME_YELLOW) .. (kb.sourceName or L.UNKNOWN) .. "|r" .. spell)
+    if kb.isEnv then
+        -- Environmental death: no attacker — show just the type label, once.
+        F.bannerSource:SetText(ColorOf(BDR.UI.NAME_YELLOW) .. (kb.spellName or L.UNKNOWN) .. "|r")
+    else
+        -- Only show the "• <spell>" segment for an actual spell (melee blows have no ID).
+        local spellName = kb.spellID and SpellNameAt(kb) or kb.spellName
+        local spell = spellName and ("  " .. ColorOf(BDR.UI.TEXT_DIM) .. "•|r  "
+            .. ColorOf(BDR.UI.TEXT) .. spellName .. "|r") or ""
+        F.bannerSource:SetText(ColorOf(BDR.UI.NAME_YELLOW) .. (kb.sourceName or L.UNKNOWN) .. "|r" .. spell)
+    end
 
-    -- Headline number = total damage taken in the window (matches the "Total
-    -- Damage" row), attributed to the killing blow named above. Falls back to the
-    -- killing-blow amount when no source totals are available.
-    local total = 0
-    for _, s in ipairs(report.sources or {}) do total = total + (s.total or 0) end
-    if total <= 0 then total = kb.amount or 0 end
-    F.bannerAmount:SetText(ColorOf(BDR.UI.DAMAGE) .. FormatFull(total) .. "|r")
-    F.bannerOver:SetText(kb.overkill
-        and ("|cff888888" .. L.OVERKILL:format(FormatAmount(kb.overkill)) .. "|r") or "")
+    -- Headline number = the KILLING BLOW's own damage (the last spell), with its
+    -- overkill beneath — not the whole-window total. Signed (minus) like the table.
+    F.bannerAmount:SetText(ColorOf(BDR.UI.DAMAGE) .. "-" .. FormatFull(kb.amount or 0) .. "|r")
+    if kb.isInstaKill then
+        F.bannerOver:SetText("|cff888888" .. L.INSTANT_KILL .. "|r")
+    elseif kb.overkill then
+        F.bannerOver:SetText("|cff888888" .. L.OVERKILL:format(FormatAmount(kb.overkill)) .. "|r")
+    else
+        F.bannerOver:SetText("")
+    end
 end
 
-local function RenderGraph(report)
+function RenderGraph(report)   -- assigns the forward-declared upvalue (see GraphTrack)
     local graph = F.graph
     PoolReset(F.graphLinePool)
-    PoolReset(F.graphFillPool)
     PoolReset(F.dotPool)
     PoolReset(F.tailPool)
     PoolReset(F.xtickPool)
-    PoolReset(F.xminorPool)
-    F.graphHL:Hide(); F.markerGlow:Hide()
+    F.graphHL:Hide(); F.markerGlow:Hide(); F.deathMarker:Hide()
     F.markerPos = {}
     F.trackRow = nil
     F.tracking = false
@@ -833,55 +990,61 @@ local function RenderGraph(report)
     end
     F.graphNote:Hide()
 
-    -- Time model: 0s = first event ("into combat"); death sits at X=duration, and
-    -- the plot runs to duration + TAIL_SECONDS so the killing blow isn't flush right.
+    -- Time model: the curve's `t` is seconds-relative-to-death (<= 0). The X axis
+    -- is labelled in seconds-BEFORE-death (death = 0 at X(0)); GRAPH_PAD seconds of
+    -- breathing room are added BEFORE the first hit and AFTER death so neither end
+    -- is flush to an edge.
     local first    = curve[1].t            -- oldest (most-negative) time
     local duration = -first
-    local xMax     = duration + TAIL_SECONDS
-    if xMax <= 0 then xMax = 1 end
+    -- Full extent (with the GRAPH_PAD margins) vs the currently-VISIBLE window — a
+    -- zoomed sub-range (mouse-wheel over the graph), or the full extent when unzoomed.
+    local fullMin  = first - GRAPH_PAD
+    local fullMax  = GRAPH_PAD
+    local visMin   = F.zoomMin or fullMin
+    local visMax   = F.zoomMax or fullMax
+    if visMin < fullMin then visMin = fullMin end
+    if visMax > fullMax then visMax = fullMax end
+    if visMax - visMin < 0.05 then visMax = visMin + 0.05 end   -- min ~50ms window (see ms-apart hits)
+    local xMinT    = visMin
+    local span     = visMax - visMin
+    if span <= 0 then span = 1 end
     F.graphLabel:SetText(L.HP_HEADER:format(math.max(1, math.floor(duration + 0.5))))
 
-    local function X(t)   return (t - first) / xMax * gw end
+    local function X(t)   return (t - xMinT) / span * gw end
     local function Y(pct)
         pct = math.max(Y_AXIS_MIN, math.min(100, pct))
         return (pct - Y_AXIS_MIN) / (100 - Y_AXIS_MIN) * gh
     end
 
-    -- X axis: whole-second labels + 0.5s minor ticks (only over the live duration).
-    for s = 0, math.floor(duration) do
-        local fs = PoolNext(F.xtickPool, graph)
-        fs:ClearAllPoints()
-        fs:SetPoint("TOP", graph, "BOTTOMLEFT", s / xMax * gw, -2)
-        fs:SetText(s .. "s")
-    end
-    local minor = 0.5
-    while minor <= duration do
-        if minor % 1 ~= 0 then
-            local tick = PoolNext(F.xminorPool, graph)
-            tick:ClearAllPoints()
-            tick:SetPoint("BOTTOM", graph, "BOTTOMLEFT", minor / xMax * gw, 0)
-            tick:SetSize(1, 4)
+    -- X axis: seconds-BEFORE-death labels within the VISIBLE range (finer ticks when
+    -- zoomed in); 0 is skipped (the tombstone marks death). Labels are on `f` so the
+    -- graph's clip can't hide them.
+    local vis = visMax - visMin
+    local lstep = (vis > 16) and 4 or (vis > 8) and 2 or (vis > 3) and 1 or (vis > 1.2) and 0.5 or 0.25
+    local tk = math.ceil(visMin / lstep - 1e-6) * lstep
+    while tk <= visMax + 1e-6 do
+        if tk <= -1e-6 then                  -- only before death; 0 belongs to the tombstone
+            local fs = PoolNext(F.xtickPool, F)
+            fs:ClearAllPoints()
+            fs:SetPoint("TOP", graph, "BOTTOMLEFT", X(tk), -2)
+            fs:SetText((lstep < 1) and string.format("%.1fs", tk) or string.format("%ds", tk))
+            fs:SetTextColor(unpack(BDR.UI.TEXT_DIM))
         end
-        minor = minor + 0.5
+        tk = tk + lstep
     end
 
-    -- Area fill: stepped columns tinted by HP (cosmetic urgency mirror of the line).
-    for px = 0, gw, 2 do
-        local t = first + (px / gw) * xMax
-        if t <= 0 then
-            local h = Y(StepPctAt(curve, t))
-            if h > 0 then
-                local col = PoolNext(F.graphFillPool, graph)
-                local c = HpColor(StepPctAt(curve, t))
-                col:SetColorTexture(c[1], c[2], c[3], 0.16)
-                col:ClearAllPoints()
-                col:SetPoint("BOTTOMLEFT", graph, "BOTTOMLEFT", px, 0)
-                col:SetSize(2.5, h)
-            end
-        end
+    -- Tombstone marker at the death point — only when death is in view.
+    if visMin <= 0 and visMax >= 0 then
+        F.deathMarker:ClearAllPoints()
+        F.deathMarker:SetPoint("TOP", graph, "BOTTOMLEFT", X(0), -1)
+        F.deathMarker:Show()
+    else
+        F.deathMarker:Hide()
     end
 
-    -- Stepped line, gradient by HP (horizontal hold, then a vertical drop per hit).
+    -- Stepped line, gradient by HP (horizontal hold, then a vertical drop per hit):
+    -- HP holds flat between hits and drops straight down on a hit — the true shape
+    -- (a diagonal would imply HP bleeding down gradually, which misreads the drop).
     local function Seg(x1, y1, x2, y2, c)
         local line = PoolNext(F.graphLinePool, graph)
         line:SetThickness(2)
@@ -891,72 +1054,176 @@ local function RenderGraph(report)
     end
     for i = 2, #curve do
         local a, b = curve[i - 1], curve[i]
-        Seg(X(a.t), Y(a.pct), X(b.t), Y(a.pct), HpColor(a.pct))
-        Seg(X(b.t), Y(a.pct), X(b.t), Y(b.pct), HpColor(math.min(a.pct, b.pct)))
+        if not ((a.t < visMin and b.t < visMin) or (a.t > visMax and b.t > visMax)) then
+            Seg(X(a.t), Y(a.pct), X(b.t), Y(a.pct), HpColor(a.pct))
+            Seg(X(b.t), Y(a.pct), X(b.t), Y(b.pct), HpColor(math.min(a.pct, b.pct)))
+        end
     end
 
     -- Post-death dashed fading tail at HP = 0, from the death point to the edge.
     local deathX, zeroY = X(0), Y(0)
-    local tx, alpha = deathX + 5, 0.7
+    local tx, alpha = deathX + 3, 0.7
     while tx < gw do
         local d = PoolNext(F.tailPool, graph)
         d:SetColorTexture(BDR.UI.HP_LOW[1], BDR.UI.HP_LOW[2], BDR.UI.HP_LOW[3], math.max(0.08, alpha))
         d:ClearAllPoints()
         d:SetPoint("LEFT", graph, "BOTTOMLEFT", tx, zeroY)
         d:SetSize(4, 2)
-        tx, alpha = tx + 8, alpha - 0.06
+        tx, alpha = tx + 6, alpha - 0.06
     end
 
-    -- Event dots on the line, coloured by damage school (heals green); KB bigger.
+    -- Pre-combat dashed margin before the first hit, at the first sample's HP level
+    -- (mirrors the post-death tail, fading out toward the left edge).
+    local firstX, firstY = X(first), Y(curve[1].pct)
+    local fc = HpColor(curve[1].pct)
+    local lx, lalpha = firstX - 3, 0.7
+    while lx > 0 do
+        local d = PoolNext(F.tailPool, graph)
+        d:SetColorTexture(fc[1], fc[2], fc[3], math.max(0.08, lalpha))
+        d:ClearAllPoints()
+        d:SetPoint("RIGHT", graph, "BOTTOMLEFT", lx, firstY)
+        d:SetSize(4, 2)
+        lx, lalpha = lx - 6, lalpha - 0.06
+    end
+
+    -- Event markers on the line: a school-coloured DOT per hit (heals green), KB bigger.
     for _, ev in ipairs(report.hits or report.events or {}) do
-        if ev.t >= first and ev.t <= 0 then
-            local gx, gy = X(ev.t), Y(StepPctAt(curve, ev.t))
+        if ev.t >= visMin - 0.001 and ev.t <= visMax + 0.001 then
+            local gx, gy = X(ev.t), Y(ev.hpPct or StepPctAt(curve, ev.t))   -- HP when it landed
             local color = (ev.kind == "heal") and BDR.UI.HEAL or (SchoolInfo(ev.school))
-            local r = ev.isKillingBlow and 8 or 5
+            local r = ev.isKillingBlow and 7 or 5   -- dot radius (KB emphasised)
             local d = PoolNext(F.dotPool, graph)
             d:SetSize(r * 2, r * 2)
             d:ClearAllPoints()
             d:SetPoint("CENTER", graph, "BOTTOMLEFT", gx, gy)
-            d.fill:SetVertexColor(color[1], color[2], color[3], 1)
+            d.fill:SetColorTexture(color[1], color[2], color[3], 1)
             F.markerPos[ev] = { x = gx, y = gy, r = r * 2 }
         end
     end
 
-    F.mapT = { first = first, xMax = xMax, gw = gw, gh = gh, curve = curve,
+    F.mapT = { first = first, xMinT = xMinT, span = span, gw = gw, gh = gh, curve = curve,
+               fullMin = fullMin, fullMax = fullMax,
                hits = report.hits or report.events or {} }
+
+    -- Mouse-wheel over the graph zooms the time window in/out, centred on the cursor;
+    -- wheeling all the way out restores the full view. (Hooked once.)
+    if not F.zoomHooked then
+        F.zoomHooked = true
+        F.graphOverlay:EnableMouseWheel(true)
+        F.graphOverlay:SetScript("OnMouseWheel", function(self, delta)
+            local m = F.mapT
+            if not (m and F.report) then return end
+            local s  = self:GetEffectiveScale()
+            local gx = (GetCursorPosition() / s) - F.graph:GetLeft()
+            gx = math.max(0, math.min(m.gw, gx))
+            local cursorT  = gx / m.gw * m.span + m.xMinT
+            local fullSpan = m.fullMax - m.fullMin
+            local newSpan  = math.max(0.05, math.min(m.span * (delta > 0 and 0.8 or 1.25), fullSpan))
+            local frac     = (m.span > 0) and (cursorT - m.xMinT) / m.span or 0.5
+            local newMin   = cursorT - frac * newSpan
+            local newMax   = newMin + newSpan
+            if newMin < m.fullMin then newMin, newMax = m.fullMin, m.fullMin + newSpan end
+            if newMax > m.fullMax then newMax, newMin = m.fullMax, m.fullMax - newSpan end
+            if newMin < m.fullMin then newMin = m.fullMin end
+            if newSpan >= fullSpan - 1e-3 then
+                F.zoomMin, F.zoomMax = nil, nil          -- fully out → full view
+            else
+                F.zoomMin, F.zoomMax = newMin, newMax
+            end
+            RenderGraph(F.report)
+        end)
+
+        -- Click-drag the graph: pan the visible window when zoomed in, or (fully
+        -- zoomed out) move the whole window like the title bar.
+        F.graphOverlay:EnableMouse(true)
+        F.graphOverlay:RegisterForDrag("LeftButton")
+        F.graphOverlay:SetScript("OnDragStart", function(self)
+            local m = F.mapT
+            if m and (F.zoomMin or F.zoomMax) then
+                self.panning     = true
+                self.panStartX   = GetCursorPosition() / self:GetEffectiveScale()
+                self.panSpan     = (F.zoomMax or m.fullMax) - (F.zoomMin or m.fullMin)
+                self.panStartMin = F.zoomMin or m.fullMin
+                GraphTrackStop()
+            elseif not BDR.DB.locked then
+                self.movingWindow = true
+                F:StartMoving()
+                GraphTrackStop()
+            end
+        end)
+        F.graphOverlay:SetScript("OnDragStop", function(self)
+            if self.panning then
+                self.panning = false
+            elseif self.movingWindow then
+                self.movingWindow = false
+                F:StopMovingOrSizing()
+                SavePosition()
+            end
+        end)
+    end
+end
+
+-- Blizzard-style hover tooltip for a row's NON-event area: headline damage (with
+-- school + overkill), spell by source, remaining HP, and time before death — the
+-- "Time / Damage / HP" tooltip Blizzard's own death recap shows on mouseover.
+local function ShowRowTip(owner, ev)
+    local curve = (F.report and F.report.healthCurve) or {}
+    local hp = math.floor((ev.hpPct or PctAtT(curve, ev.t)) + 0.5)
+    local isHeal = ev.kind == "heal"
+    local dc = isHeal and BDR.UI.HEAL or BDR.UI.DAMAGE
+
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    local headline = FormatFull(ev.amount)
+    local _, schoolName = SchoolInfo(ev.school)
+    if schoolName ~= "" then headline = headline .. " " .. schoolName end
+    if ev.overkill and ev.overkill > 0 then
+        headline = headline .. " " .. L.TIP_OVERKILL:format(FormatFull(ev.overkill))
+    end
+    GameTooltip:AddLine(headline, dc[1], dc[2], dc[3])
+    -- Environmental deaths have no attacker — show just the type, not "X by X".
+    if ev.isEnv then
+        GameTooltip:AddLine(SpellNameAt(ev), 0.95, 0.95, 0.95)
+    else
+        GameTooltip:AddLine(L.TIP_BY:format(SpellNameAt(ev), ev.sourceName or L.UNKNOWN), 0.95, 0.95, 0.95)
+    end
+    local hc = HpColor(hp)
+    GameTooltip:AddLine((ev.isKillingBlow and L.TIP_HP_KB or L.TIP_HP_REMAINING):format(hp),
+        hc[1], hc[2], hc[3])
+    GameTooltip:AddLine(L.TIP_TIME_BEFORE:format(-ev.t), 0.7, 0.7, 0.7)
+    GameTooltip:Show()
 end
 
 -- Positions the table column header + the scrollable rows; returns the y below.
 local function RenderTable(report)
     PoolReset(F.rowPool)
     F.rowOf = {}
-    local hits = report.hits or report.events or {}
+    local allHits = report.hits or report.events or {}
 
-    -- Newest first (chronological list is oldest→newest; reverse it).
+    -- Damage-only (heals stay on the graph, not in the table), newest first.
     local ordered = {}
-    for i = #hits, 1, -1 do ordered[#ordered + 1] = hits[i] end
+    for i = #allHits, 1, -1 do
+        if allHits[i].kind ~= "heal" then ordered[#ordered + 1] = allHits[i] end
+    end
     local total = #ordered
 
-    -- Column header (aligned to the row columns).
+    -- Column header — every title LEFT-aligned at its column's left edge (borderless
+    -- grid; titles all the way to the left of their cell).
     local hy = F.tableTop
-    F.hdrTime:ClearAllPoints();    F.hdrTime:SetPoint("TOPLEFT", PAD + C_TIME_X, hy)
-    F.hdrAbility:ClearAllPoints(); F.hdrAbility:SetPoint("TOPLEFT", PAD + C_NAME_X, hy)
-    local OFF       = PAD + SCROLLBAR_W
-    local barRight  = OFF + C_PCT_PAD                            -- right edge of the bar
-    local numRight  = barRight + C_PCT_BAR_W + C_PCT_GAP         -- right edge of the % number
-    local dmgRight  = numRight + C_PCT_NUM_W + 8
-    local typeRight = dmgRight + C_DMG_W + 12
-    F.hdrPct:ClearAllPoints()
-    F.hdrPct:SetPoint("TOPRIGHT", -barRight, hy)                 -- label spans the whole column
-    F.hdrPct:SetWidth(C_PCT_BAR_W + C_PCT_GAP + C_PCT_NUM_W)
-    F.hdrAmount:ClearAllPoints(); F.hdrAmount:SetPoint("TOPRIGHT", -dmgRight, hy); F.hdrAmount:SetWidth(C_DMG_W)
-    F.hdrType:ClearAllPoints();   F.hdrType:SetPoint("TOPRIGHT", -typeRight, hy);  F.hdrType:SetWidth(C_TYPE_W)
+    F.hdrTime:ClearAllPoints();   F.hdrTime:SetPoint("TOPLEFT", PAD + C_TIME_X, hy)
+    F.hdrEvent:ClearAllPoints();  F.hdrEvent:SetPoint("TOPLEFT", PAD + C_EVENT_X, hy)
+    F.hdrSource:ClearAllPoints(); F.hdrSource:SetPoint("TOPLEFT", PAD + C_SOURCE_X, hy)
+    F.hdrDamage:ClearAllPoints(); F.hdrDamage:SetPoint("TOPLEFT", PAD + C_DMG_X, hy)
+    F.hdrPct:ClearAllPoints();    F.hdrPct:SetPoint("TOPLEFT", PAD + C_HP_BAR_X - C_HP_NUM_W - 4, hy)
 
-    local stride    = ROW_H + ROW_GAP
-    local shown     = math.min(TL_VISIBLE_ROWS, math.max(total, 1))
-    local rowW      = WINDOW_W - 2 * PAD - SCROLLBAR_W
-    local scrollTop = F.tableTop - TBL_HDR
-    local viewportH = shown * stride
+    local stride     = ROW_H + ROW_GAP
+    local shown      = math.min(TL_VISIBLE_ROWS, math.max(total, 1))
+    -- Reserve room for the scrollbar when the list overflows (same as the Damage
+    -- Sources table) so the right-hand columns never hide under it; full width when
+    -- everything fits in the 5-row viewport.
+    local needScroll = total > shown
+    local rowW       = WINDOW_W - 2 * PAD - (needScroll and SCROLLBAR_W or 0)
+    local scrollTop  = F.tableTop - TBL_HDR
+    local viewportH  = shown * stride
 
     F.tableScroll:ClearAllPoints()
     F.tableScroll:SetPoint("TOPLEFT", PAD, scrollTop)
@@ -965,107 +1232,125 @@ local function RenderTable(report)
     F.tableScroll:SetVerticalScroll(0)
     F.tableScroll:Show()
     local bar = _G["BetterDeathRecapTableScrollScrollBar"]
-    if bar then if total > shown then bar:Show() else bar:Hide() end end
+    if bar then if needScroll then bar:Show() else bar:Hide() end end
 
     local curve = report.healthCurve or {}
     local y = 0
-    for idx, ev in ipairs(ordered) do
+    for _, ev in ipairs(ordered) do
         local row = PoolNext(F.rowPool, F.tableChild)
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", F.tableChild, "TOPLEFT", 0, y)
         row:SetWidth(rowW)
         F.rowOf[ev] = row
 
-        local isHeal = ev.kind == "heal"
-        local hpLevel = PctAtT(curve, ev.t)             -- HP% at the moment of this event
-        local dmgC = isHeal and BDR.UI.HEAL or BDR.UI.DAMAGE
+        -- HP when this hit landed (its own currentHP); KB shows its real pre-hit HP
+        -- (e.g. 2%), not 0. Falls back to the curve for the sample (no hpPct).
+        local hpLevel = ev.hpPct or PctAtT(curve, ev.t)
 
-        row.time:SetText(ev.t == 0 and "0.0s" or string.format("%.1fs", ev.t))
-        -- Ability icon, always shown: spell icon by ID (melee carries spell 88163).
-        row.icon:SetTexture(SpellIcon(ev.spellID) or SpellIcon(88163) or "Interface\\ICONS\\INV_Sword_04")
+        row.time:SetText(ev.t == 0 and "0.000s" or string.format("%.3fs", ev.t))
+        -- Event icon: environmental stock icon, else the spell icon (melee = 88163).
+        row.icon:SetTexture(ev.iconOverride or SpellIcon(ev.spellID) or SpellIcon(88163)
+            or "Interface\\ICONS\\INV_Sword_04")
         row.icon:Show()
+        if ev.isKillingBlow then row.deathIcon:Show() else row.deathIcon:Hide() end
         row.text:SetText(SpellNameAt(ev))
+        row.text:SetTextColor(unpack(BDR.UI.TEXT))
+        -- Source: the attacker name.
+        row.source:SetText(ev.sourceName or L.UNKNOWN)
+        row.source:SetTextColor(unpack(BDR.UI.TEXT_DIM))
 
-        -- Amount: signed (− damage / + heal), coloured red / green.
-        row.dmg:SetText((isHeal and "+" or "-") .. FormatFull(ev.amount))
+        -- Damage: the raw number, signed (minus) — the table is damage-only.
+        row.dmg:SetText("-" .. FormatFull(ev.amount))
 
-        -- "% Max HP" = the HP level at that moment + a bar of the same length
-        -- (green for heals, red for damage); matches the graph curve at that time.
+        -- Remaining HP: "NN%" + a flat bar of that length, coloured by HP level.
+        local hc = HpColor(hpLevel)
         row.pct:SetText(string.format("%d%%", math.floor(hpLevel + 0.5)))
-        row.pct:SetTextColor(unpack(BDR.UI.TEXT_DIM))
-        row.pctBar:SetColorTexture(dmgC[1], dmgC[2], dmgC[3], 0.9)
-        row.pctBar:SetWidth(math.max(1, C_PCT_BAR_W * math.min(100, hpLevel) / 100))
+        row.pct:SetTextColor(hc[1], hc[2], hc[3])
+        row.pctBar:SetColorTexture(hc[1], hc[2], hc[3], 0.9)
+        row.pctBar:SetWidth(math.max(1, C_HP_BAR_W * math.min(100, math.max(0, hpLevel)) / 100))
         row.pctBarBg:Show(); row.pctBar:Show()
 
-        -- Type pill: Hit/DoT in red, Heal/HoT in green.
-        local typeLabel
-        if isHeal then typeLabel = ev.periodic and L.TYPE_HOT or L.TYPE_HEAL
-        else           typeLabel = ev.periodic and L.TYPE_DOT or L.TYPE_HIT end
-        row.typeBg:SetColorTexture(dmgC[1], dmgC[2], dmgC[3], 0.16)
-        row.typeTxt:SetText(typeLabel)
-        row.typeTxt:SetTextColor(dmgC[1], dmgC[2], dmgC[3])
-
-        -- Row background: alternating shade, KB strong red, type accent bar.
+        -- Row background: one unified panel colour (same as the graph canvas); the
+        -- killing blow gets the strong red wash.
         row.isKB = ev.isKillingBlow
         if ev.isKillingBlow then
             row.bgTex:SetColorTexture(unpack(BDR.UI.ROW_KB_BG))
             row.hl:Show()
-            row.accent:SetColorTexture(unpack(BDR.UI.DAMAGE)); row.accent:Show()
-            row.dmg:SetTextColor(1, 0.4, 0.4)
+            row.dmg:SetTextColor(1, 0.45, 0.45)
         else
-            local alt = (idx % 2 == 0)
-            row.bgTex:SetColorTexture(unpack(alt and BDR.UI.ROW_ALT or { 0.05, 0.05, 0.065, 1 }))
+            row.bgTex:SetColorTexture(unpack(BDR.UI.PANEL_BG))
             row.hl:Hide()
-            row.accent:SetColorTexture(dmgC[1], dmgC[2], dmgC[3]); row.accent:Show()
-            row.dmg:SetTextColor(unpack(dmgC))
+            row.dmg:SetTextColor(unpack(BDR.UI.DAMAGE))
         end
 
+        -- Hover split: the Event cell (icon+name) → spell tooltip; the rest of the
+        -- row → the Time/Damage/HP tooltip (Blizzard-style), via the eventBtn overlay.
         row.ev = ev
-        row:SetScript("OnEnter", function(self)
+        row:SetScript("OnEnter", function(self) HoverEvent(self.ev); ShowRowTip(self, self.ev) end)
+        row:SetScript("OnLeave", function(self) UnhoverEvent(self.ev); GameTooltip:Hide() end)
+        row.eventBtn.ev = ev
+        row.eventBtn:SetScript("OnEnter", function(self)
             HoverEvent(self.ev)
             if self.ev.spellID and GameTooltip.SetSpellByID then
                 GameTooltip:SetOwner(self, "ANCHOR_TOP")  -- top-center of the row
                 GameTooltip:SetSpellByID(self.ev.spellID)
                 GameTooltip:Show()
+            else
+                ShowRowTip(self, self.ev)
             end
         end)
-        row:SetScript("OnLeave", function(self) UnhoverEvent(self.ev); GameTooltip:Hide() end)
+        row.eventBtn:SetScript("OnLeave", function(self) UnhoverEvent(self.ev); GameTooltip:Hide() end)
         y = y - stride
     end
 
-    -- "Scroll for more" hint when the list overflows the viewport.
+    -- (No "scroll for more" hint — the scrollbar itself signals overflow.)
+    F.scrollHint:Hide()
     local yBottom = scrollTop - viewportH
-    if total > shown then
-        F.scrollHint:ClearAllPoints()
-        F.scrollHint:SetPoint("TOP", F.tableScroll, "BOTTOM", 0, -2)
-        F.scrollHint:SetText("▼ " .. L.SCROLL_MORE)
-        F.scrollHint:Show()
-        yBottom = yBottom - 12
-    else
-        F.scrollHint:Hide()
-    end
     return yBottom
 end
 
+-- The Damage Sources section is COLLAPSIBLE. Collapsed (default): just the
+-- clickable "▶ Total Damage <grand>" line on top. Expanded: the sources meter list,
+-- then "▼ Total Damage <grand>" below it (clicking either toggles).
 local function RenderSources(report, yTop)
     PoolReset(F.srcRowPool)
     local sources = report.sources or {}
+    local grand = 0
+    for _, s in ipairs(sources) do grand = grand + (s.total or 0) end
 
-    -- Divider, then the gray section header.
+    -- Divider above the section.
     F.divSources:ClearAllPoints()
     F.divSources:SetPoint("TOPLEFT", PAD, yTop)
     F.divSources:SetPoint("TOPRIGHT", -PAD, yTop)
     F.divSources:Show()
 
+    local collapsed = BDR.DB.sourcesCollapsed
+    -- No ▶/▼ icon; the grand total is RED (same as the overkill damage).
+    local totalText = ColorOf(BDR.UI.TEXT_DIM) .. L.TOTAL_DAMAGE .. "   |r"
+        .. ColorOf(BDR.UI.DAMAGE) .. FormatFull(grand) .. "|r"
+    F.srcTotalLabel:SetText(totalText)
+
+    local function placeTotal(y)
+        F.srcTotalBtn:ClearAllPoints()
+        F.srcTotalBtn:SetPoint("TOPLEFT", PAD, y)
+        F.srcTotalBtn:SetPoint("TOPRIGHT", -PAD, y)
+        F.srcTotalBtn:Show()
+        return y - SRC_TOTAL_H
+    end
+
+    if collapsed then
+        F.srcHeader:Hide(); F.srcScroll:Hide(); F.divTotal:Hide()
+        local cbar = _G["BetterDeathRecapSrcScrollScrollBar"]; if cbar then cbar:Hide() end
+        return placeTotal(yTop - 6)
+    end
+
+    -- Expanded: header + the scrollable meter list.
+    F.srcHeader:Show()
     local y = yTop - 8
     F.srcHeader:ClearAllPoints()
     F.srcHeader:SetPoint("TOPLEFT", PAD, y)
     y = y - SRC_HDR
 
-    local grand = 0
-    for _, s in ipairs(sources) do grand = grand + (s.total or 0) end
-
-    -- Scrollable list (scrollbar only appears when it overflows the viewport).
     local count      = #sources
     local shown      = math.min(SRC_VISIBLE_ROWS, math.max(count, 1))
     local needScroll = count > shown
@@ -1088,45 +1373,30 @@ local function RenderSources(report, yTop)
         row:SetPoint("TOPLEFT", F.srcChild, "TOPLEFT", 0, ry)
         row:SetWidth(rowW)
 
-        local icon = SpellIcon(s.spellID)
+        local icon = s.iconOverride or SpellIcon(s.spellID)
         if icon then row.icon:SetTexture(icon); row.icon:Show() else row.icon:Hide() end
+        -- Source portrait over the icon (env sources keep their stock icon, no model).
+        SetCreatureModel(row.portrait, (not s.iconOverride) and s.sourceGUID or nil)
         row.name:SetText(s.name or L.UNKNOWN)
         row.name:SetTextColor(unpack(BDR.UI.TEXT))
-        row.pct:SetText(string.format("%.1f%%", s.pct or 0))
-        row.pct:SetTextColor(unpack(BDR.UI.TEXT))
-        row.amount:SetText(FormatFull(s.total))
-        row.amount:SetTextColor(unpack(BDR.UI.TEXT_DIM))
+        row.amount:SetText(FormatFull(s.total))     -- raw damage total (no percentage)
+        row.amount:SetTextColor(unpack(BDR.UI.TEXT))
 
+        -- Fat fill across the whole row, width ∝ this source's share of the total.
         local c = (i == 1) and BDR.UI.SOURCE_PRIMARY or BDR.UI.SOURCE_OTHER
-        row.barFill:SetColorTexture(c[1], c[2], c[3], 1)
-        -- Bar spans from after the name (x≈147) to before the pct column; the
-        -- name/pct/amount column widths are fixed, so compute it directly rather
-        -- than reading barBg:GetWidth() (anchors aren't resolved until next draw).
-        local bw = math.max(1, (rowW - 275))
-        row.barFill:SetWidth(math.max(1, bw * (s.pct or 0) / 100))
+        row.barFill:SetColorTexture(c[1], c[2], c[3], 0.9)
+        row.barFill:SetWidth(math.max(2, rowW * (s.pct or 0) / 100))
         ry = ry - SRC_ROW_H
     end
     y = y - viewportH
 
-    -- Divider, then the centered Total Damage row.
+    -- Divider, then the Total Damage toggle below the list.
     y = y - 4
     F.divTotal:ClearAllPoints()
     F.divTotal:SetPoint("TOPLEFT", PAD, y)
     F.divTotal:SetPoint("TOPRIGHT", -PAD, y)
     F.divTotal:Show()
-    y = y - 6
-
-    F.srcTotalLabel:ClearAllPoints()
-    F.srcTotalLabel:SetPoint("TOP", F, "TOP", 0, y)
-    F.srcTotalLabel:SetText(ColorOf(BDR.UI.TEXT) .. L.TOTAL_DAMAGE .. "|r")
-    F.srcTotalPct:ClearAllPoints()
-    F.srcTotalPct:SetPoint("TOPRIGHT", -PAD, y); F.srcTotalPct:SetWidth(44)
-    F.srcTotalPct:SetText("100%")
-    F.srcTotalAmount:ClearAllPoints()
-    F.srcTotalAmount:SetPoint("TOPRIGHT", F.srcTotalPct, "LEFT", -10, 0); F.srcTotalAmount:SetWidth(80)
-    F.srcTotalAmount:SetText(ColorOf(BDR.UI.TEXT) .. FormatFull(grand) .. "|r")
-
-    return y - SRC_TOTAL_H
+    return placeTotal(y - 6)
 end
 
 local function RenderFooter(report, yTop)
@@ -1136,23 +1406,24 @@ local function RenderFooter(report, yTop)
     if ctx.zone then parts[#parts + 1] = ctx.zone end
     parts[#parts + 1] = L.FOOTER_WINDOW:format(ctx.windowSeconds or BDR.CONFIG.WINDOW_SECONDS)
 
-    -- Divider above the footer.
+    -- Divider above the footer; the text is vertically centred in the visible band
+    -- below it — between the divider and the window's bottom edge (FOOTER_H + PAD).
     F.divFooter:ClearAllPoints()
     F.divFooter:SetPoint("TOPLEFT", PAD, yTop)
     F.divFooter:SetPoint("TOPRIGHT", -PAD, yTop)
     F.divFooter:Show()
-    local y = yTop - 7
+    local midY = yTop - (FOOTER_H + PAD) / 2
 
     F.footer:ClearAllPoints()
-    F.footer:SetPoint("TOPLEFT", PAD, y)
+    F.footer:SetPoint("LEFT", F, "TOPLEFT", PAD, midY)
     F.footer:SetText(ColorOf(BDR.UI.TEXT_DIM) .. table.concat(parts, "  •  "):upper() .. "|r")
 
     F.footerHint:ClearAllPoints()
-    F.footerHint:SetPoint("TOPRIGHT", -PAD, y)
+    F.footerHint:SetPoint("RIGHT", F, "TOPRIGHT", -PAD, midY)
     F.footerHint:SetText(ColorOf(BDR.UI.TEXT_DIM)
         .. (report.isSample and L.FOOTER_SAMPLE or L.FOOTER_HINT):upper() .. "|r")
 
-    return y - FOOTER_H
+    return yTop - FOOTER_H
 end
 
 -- ── public API ───────────────────────────────────────────────────────────────
@@ -1168,6 +1439,7 @@ function Display:Show(report)
     if not report then return end
     EnsureFrame()
     F.report = report
+    F.zoomMin, F.zoomMax = nil, nil   -- a (re)shown report starts at the full graph view
     ResolveLayout()
 
     RenderBanner(report)
@@ -1181,13 +1453,13 @@ function Display:Show(report)
         PoolReset(F.rowPool); PoolReset(F.srcRowPool)
         F.tableScroll:Hide(); F.scrollHint:Hide(); F.srcScroll:Hide()
         F.divSources:Hide(); F.divTotal:Hide()
-        F.hdrTime:Hide(); F.hdrAbility:Hide(); F.hdrType:Hide(); F.hdrAmount:Hide(); F.hdrPct:Hide()
-        F.srcHeader:Hide(); F.srcTotalLabel:Hide(); F.srcTotalAmount:Hide(); F.srcTotalPct:Hide()
+        F.hdrTime:Hide(); F.hdrEvent:Hide(); F.hdrSource:Hide(); F.hdrDamage:Hide(); F.hdrPct:Hide()
+        F.srcHeader:Hide(); F.srcTotalBtn:Hide()
         yBottom = RenderFooter(report, F.tableTop)
     else
         F.emptyText:Hide()
-        F.hdrTime:Show(); F.hdrAbility:Show(); F.hdrType:Show(); F.hdrAmount:Show(); F.hdrPct:Show()
-        F.srcHeader:Show(); F.srcTotalLabel:Show(); F.srcTotalAmount:Show(); F.srcTotalPct:Show()
+        F.hdrTime:Show(); F.hdrEvent:Show(); F.hdrSource:Show(); F.hdrDamage:Show(); F.hdrPct:Show()
+        -- (srcHeader / srcTotalBtn shown by RenderSources per the collapse state)
         local yAfterTbl = RenderTable(report)
         local yAfterSrc = RenderSources(report, yAfterTbl - 10)
         yBottom = RenderFooter(report, yAfterSrc - 6)
@@ -1201,7 +1473,7 @@ function Display:Toggle()
     EnsureFrame()
     if F:IsShown() then F:Hide(); return end
     local report = BDR.Analyzer:Build()
-    if not (report and not report.empty) then report = BDR.DB.lastReport end
+    if not (report and not report.empty) then report = BDR.GetLastReport() end
     if report then
         self:Show(report)
     else
@@ -1214,7 +1486,7 @@ function Display:RefreshIfShown(report)
 end
 
 function Display:ShowLast()
-    local report = BDR.DB.lastReport
+    local report = BDR.GetLastReport()
     if not report then
         BDR.Print(BDR.COLOR.WARN .. L.NO_HISTORY .. BDR.COLOR.RESET)
         return

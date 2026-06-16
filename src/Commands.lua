@@ -15,6 +15,9 @@ local function Dispatch(msg)
     elseif cmd == "history" or cmd == "last" then
         BDR.Display:ShowLast()
 
+    elseif cmd == "options" or cmd == "config" then
+        if BDR.Options then BDR.Options:Open() end
+
     elseif cmd == "lock" then
         BDR.Display:SetLocked(true)
         BDR.Print(BDR.COLOR.OK .. L.LOCKED .. BDR.COLOR.RESET)

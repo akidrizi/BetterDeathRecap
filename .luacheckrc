@@ -32,6 +32,7 @@ globals = {
     "UnitGUID",
     "UnitName",
     "UnitExists",
+    "GetRealmName",
 
     -- Spell info (icon swatches + names in the timeline)
     "C_Spell",
@@ -57,10 +58,14 @@ globals = {
 
     -- Lua/WoW table helpers injected globally by the client
     "wipe",
+    "strsplit",
 
     -- UI / frame
     "CreateFrame",
     "UIParent",
+    "Minimap",
+    "GetMinimapShape",
+    "Settings",
     "GameTooltip",
     "GetCursorPosition",
     "DEFAULT_CHAT_FRAME",

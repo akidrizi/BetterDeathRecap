@@ -31,8 +31,14 @@ timestamp=1781110132.094  -- epoch seconds (real; sort by this)
 ```
 `currentHP` is the health the player had when the hit landed (KB example:
 1219 HP, hit of 41099 with 39880 overkill → effective 1219 → 0/death).
-**Curve is normalised to peak observed `currentHP`**, since `GetRecapMaxHealth`
-returned ~420k against a ~179.5k real max.
+**Curve is normalised to the REAL max health** (`currentHP / maxHP`, as Blizzard
+does), NOT to the peak observed `currentHP` — normalising to the peak forced the
+first point to 100% even when the fight opened below full health (the "always
+starts at 100%" bug). `maxHP` = `GetRecapMaxHealth` on the **newest** recap id
+(reliable — the old ~420k vs ~179.5k mismatch came from reading a *stale* id),
+cross-checked against `UnitHealthMax("player")`; if the recap max looks
+implausible (> 1.5× the unit max) we fall back to the unit max, and never let the
+denominator drop below the peak observed HP. See `Analyzer.BuildRecapCurve`.
 
 ### What a "recap" IS (confirmed) — a fixed-COUNT buffer, not a time window
 `GetRecapEvents` returns the **last N damage events** the player took (observed

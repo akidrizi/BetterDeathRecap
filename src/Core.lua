@@ -13,14 +13,34 @@ function BDR.GetVersion()
 end
 
 -- ── SavedVariables ──────────────────────────────────────────────────────────
--- Account-wide. Holds window position, lock state, and the last death report so
--- /bdr history works across sessions.
+-- Account-wide for SETTINGS (window position, lock, scale, minimap). The last
+-- death report is stored PER-CHARACTER under `deaths[name-realm]` so each character
+-- sees only its own latest death (not whoever died most recently account-wide).
 local DB_DEFAULTS = {
-    locked     = false,
-    point      = { "CENTER", "UIParent", "CENTER", 0, 80 },
-    scale      = 1.0,   -- window scale (0.9–2.0), driven by the title-bar slider
-    lastReport = nil,
+    locked           = false,
+    point            = { "CENTER", "UIParent", "CENTER", 0, 80 },
+    scale            = 1.0,   -- slider baseline (applied as scale × CONFIG.SCALE_BASE)
+    sourcesCollapsed = true,  -- Damage Sources list starts collapsed (Total Damage only)
+    minimapShown     = true,  -- show the minimap button
+    minimapAngle     = 200,   -- minimap button position (degrees around the ring)
 }
+
+-- Per-character key for the saved death report.
+local function CharKey()
+    return (UnitName("player") or "?") .. "-" .. (GetRealmName() or "?")
+end
+
+-- The current character's last death report (per-character; not account-wide).
+function BDR.GetLastReport()
+    local d = BetterDeathRecapDB and BetterDeathRecapDB.deaths
+    return d and d[CharKey()]
+end
+
+function BDR.SetLastReport(report)
+    if not BetterDeathRecapDB then return end
+    BetterDeathRecapDB.deaths = BetterDeathRecapDB.deaths or {}
+    BetterDeathRecapDB.deaths[CharKey()] = report
+end
 
 local function InitDB()
     BetterDeathRecapDB = BetterDeathRecapDB or {}
@@ -28,6 +48,17 @@ local function InitDB()
         if BetterDeathRecapDB[k] == nil then
             BetterDeathRecapDB[k] = v
         end
+    end
+    BetterDeathRecapDB.deaths = BetterDeathRecapDB.deaths or {}
+    -- Drop the old account-wide death report (now per-character) so it can't leak
+    -- another character's death into this one.
+    BetterDeathRecapDB.lastReport = nil
+    -- One-time scale rebaseline: the slider's 1.0 now renders at the old 1.3 size
+    -- (Display multiplies by CONFIG.SCALE_BASE). Reset a previously-saved scale once
+    -- so it isn't double-applied.
+    if not BetterDeathRecapDB.scaleRebased then
+        BetterDeathRecapDB.scale = 1.0
+        BetterDeathRecapDB.scaleRebased = true
     end
     BDR.DB = BetterDeathRecapDB
 end
@@ -45,9 +76,9 @@ end
 local function BuildAndStore()
     local report = BDR.Analyzer:Build()
     if report and not report.empty then
-        local prev = BDR.DB.lastReport
+        local prev = BDR.GetLastReport()
         if not (prev and prev.killedAt) or (report.killedAt or 0) >= prev.killedAt then
-            BDR.DB.lastReport = report
+            BDR.SetLastReport(report)
             if BDR.Display and BDR.Display.RefreshIfShown then
                 BDR.Display:RefreshIfShown(report)
             end
@@ -81,6 +112,8 @@ frame:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" then
         if arg1 == addonName then
             InitDB()
+            if BDR.Options then BDR.Options:Init() end
+            if BDR.Minimap then BDR.Minimap:Init() end
             BDR.Print(BDR.COLOR.GRAY .. BDR.L.WELCOME:format(BDR.GetVersion()) .. BDR.COLOR.RESET)
         end
 
@@ -88,6 +121,9 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         -- New world/instance: any buffered health is stale relative to the
         -- fresh fight, so start clean.
         BDR.HealthTracker:Clear()
+        -- Re-place the minimap button now that ALL addons have loaded (a square-
+        -- minimap addon may define GetMinimapShape() only after our ADDON_LOADED).
+        if BDR.Minimap then BDR.Minimap:Reposition() end
 
     elseif event == "UNIT_HEALTH" then
         BDR.HealthTracker:Sample()
