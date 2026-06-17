@@ -17,13 +17,16 @@ collects the death data; we render it well. We do **not** parse the combat log
 — addons cannot access CLEU on Midnight, which is why the dominant addon (Death
 Note, 755K downloads) went dark and why this niche is open.
 
-`C_DeathRecap` does not provide a health-over-time curve, so we supplement it
-with lightweight, event-driven `UNIT_HEALTH` sampling.
+`C_DeathRecap` does not provide a health-over-time curve directly, so we
+**reconstruct** it from the recap's per-event `currentHP` (see `Analyzer.BuildRecapCurve`).
+We do **not** sample `UNIT_HEALTH` — an earlier `HealthTracker` module did, but
+`UnitHealth` is "secret" on Midnight (unusable for math) and the recap already
+carries the health readings, so that module was removed.
 
 ### Non-negotiable design principles
 - **Near-zero performance cost.** Always-on events are limited to
-  `PLAYER_DEAD`, `PLAYER_ENTERING_WORLD`, and `UNIT_HEALTH` (registered per-unit
-  for `player`, event-driven). No CLEU. No per-frame polling timers.
+  `PLAYER_DEAD`, `PLAYER_ENTERING_WORLD`, `PLAYER_ALIVE`, and `PLAYER_UNGHOST`.
+  No `UNIT_HEALTH` sampling, no CLEU, no per-frame polling timers.
 - **Read-only.** Only reads data Blizzard explicitly exposes. No protected
   actions, ban-safe.
 - **Self-contained.** No dependency on Details! or any other addon.
@@ -44,9 +47,8 @@ BetterDeathRecap/
 ├── docs/API-NOTES.md           -- verified C_DeathRecap field shapes
 ├── media/                      -- addon art (icon, minimap, banner)
 ├── src/
-│   ├── Constants.lua           -- window seconds, sample cap, colors, defaults
+│   ├── Constants.lua           -- window seconds, colors, death-icon, defaults
 │   ├── Locale.lua              -- all user-facing strings (enUS base + 7 locales)
-│   ├── HealthTracker.lua       -- UNIT_HEALTH sampling -> rolling {t, hp, hpMax}
 │   ├── Analyzer.lua            -- C_DeathRecap data -> DeathReport (+ sample report)
 │   ├── Display.lua             -- renders the frame incl. the HP graph + hover
 │   ├── RecapButton.lua         -- "Better Recap" button on the death dialog
@@ -61,7 +63,7 @@ BetterDeathRecap/
 ```
 
 ### `.toc` load order
-`Constants → Locale → HealthTracker → Analyzer → Display → RecapButton →
+`Constants → Locale → Analyzer → Display → RecapButton →
 Minimap → Options → Commands → Core` (Locale loads early so `BDR.L` exists before
 any module reads it — Display even aliases `local L = BDR.L` at load time.
 Minimap/Options load before Core so it can call their `:Init()` on `ADDON_LOADED`.
@@ -120,8 +122,8 @@ environmental events carry `isEnv` + `iconOverride` and use the label as both th
 ## The addon table & globals
 
 Each file starts with `local addonName, BDR = ...`. The shared addon table is
-`BDR`; modules hang themselves off it (`BDR.HealthTracker`, `BDR.Analyzer`,
-`BDR.Display`, `BDR.Commands`, plus `BDR.Print`, `BDR.COLOR`, `BDR.CONFIG`).
+`BDR`; modules hang themselves off it (`BDR.Analyzer`, `BDR.Display`,
+`BDR.Commands`, plus `BDR.Print`, `BDR.COLOR`, `BDR.CONFIG`).
 
 SavedVariables global: **`BetterDeathRecapDB`** (account-wide). Stores SETTINGS
 account-wide — window position, lock state, `scale`, `sourcesCollapsed`,
@@ -158,9 +160,9 @@ no `currentHP` is present — rebuilds the curve from per-hit damage, working
 backward from death (0 HP): health-before-a-hit = health-after + that hit's
 effective damage (the killing blow only removed `amount − overkill`). Event times
 are relative to death; if the recap gives no usable timestamps they're spaced
-evenly. The window grows to fit the oldest hit. **HealthTracker is now
-effectively unused for the curve** (it still samples but those values are
-secret/unused — candidate for removal).
+evenly. The window grows to fit the oldest hit. (The old `HealthTracker`
+`UNIT_HEALTH` sampler has been **removed** — the recap's `currentHP` is the curve
+source, and `UnitHealth` is secret on Midnight anyway.)
 
 **Curve normalisation — the fix for "always starts at 100%".** The curve is
 normalised to the player's **real max health** (`realMax`), NOT to the peak
@@ -188,14 +190,14 @@ Cautions (see `docs/API-NOTES.md`):
 On Midnight, some content makes `UnitHealth("player")` return a **secret/
 protected number**: addon (tainted) code may *store* it but doing arithmetic on
 it raises `attempt to perform arithmetic … (a secret number value, while
-execution tainted by 'BetterDeathRecap')`. `UnitHealthMax` was observed
-non-secret. So: `HealthTracker:Sample()` only **stores** raw `hp`/`hpMax` (no
-math — safe), and **all** health-percentage math goes through `Analyzer.SafePct`
-(a `pcall`'d `hp/hpMax`). A secret value → `SafePct` returns nil → that sample is
-skipped. If the whole curve comes back empty, Display shows
+execution tainted by 'BetterDeathRecap')`. **We therefore never read
+`UnitHealth` for the curve** — it comes from the recap's per-event `currentHP`.
+`UnitHealthMax` was observed non-secret and is used (pcall-guarded) only as the
+`realMax` cross-check. The curve math lives entirely in `BuildRecapCurve`, which
+is **`pcall`'d** in `Analyzer:Build`; if it can't build, Display shows
 `L.HP_UNAVAILABLE` instead of erroring. **Never do bare arithmetic on a
 `UnitHealth` result anywhere in this addon.** The recap data (timeline/sources/
-banner) is unaffected — it comes from `C_DeathRecap`, not `UnitHealth`.
+banner) is unaffected — it comes from `C_DeathRecap`.
 
 ### DeathReport shape (Analyzer output → Display input)
 ```lua
@@ -216,24 +218,34 @@ deals in epoch timestamps.
 ## Event wiring (Core.lua)
 
 ```
-frame:RegisterEvent("PLAYER_ENTERING_WORLD")        -- clear stale health buffer
-frame:RegisterEvent("PLAYER_DEAD")                  -- freeze snapshot, build report
+frame:RegisterEvent("ADDON_LOADED")                 -- InitDB + Options/Minimap :Init
+frame:RegisterEvent("PLAYER_ENTERING_WORLD")        -- reposition the minimap button
+frame:RegisterEvent("PLAYER_DEAD")                  -- build + store the report
 frame:RegisterEvent("PLAYER_ALIVE"/"PLAYER_UNGHOST")-- hide the on-death button
-frame:RegisterUnitEvent("UNIT_HEALTH", "player")    -- lightweight sampling
 
-PLAYER_DEAD:           BDR.lastDeathSnapshot = HealthTracker:Snapshot()  -- freeze curve
-                       C_Timer.After(0.3, BuildAndStore)  -- recap populates a beat later
-                       -- BuildAndStore: Analyzer:Build(snapshot) -> DB; RecapButton:OnDeath()
+PLAYER_DEAD:           C_Timer.After({0.3,1.0,2.0,3.5}, BuildAndStore)  -- recap populates a beat late
+                       -- BuildAndStore: Analyzer:Build() -> keep NEWEST by killedAt -> DB;
+                       --   Display:RefreshIfShown; RecapButton:OnDeath()
                        -- (we do NOT auto-open the window — it'd cover the release dialog)
-UNIT_HEALTH:           HealthTracker:Sample()
-PLAYER_ENTERING_WORLD: HealthTracker:Clear()
+PLAYER_ENTERING_WORLD: Minimap:Reposition()  -- all addons loaded → GetMinimapShape() is final
 PLAYER_ALIVE/UNGHOST:  RecapButton:OnAlive()
 ```
 
 The window is opened by the player — the **Better Recap** button (RecapButton.lua,
 anchored right of Blizzard's Recap button on the death dialog) or `/bdr`. Opening
-rebuilds from the live recap + the frozen death snapshot, falling back to the
-stored report. `/bdr` no longer falls back to the demo; only `/bdr test` does.
+rebuilds from the live recap, falling back to the stored report. `/bdr` no longer
+falls back to the demo; only `/bdr test` does.
+
+**The Better Recap button is a real element of the death dialog, themed like it.**
+It is `UIPanelButtonTemplate` **soft-skinned via ElvUI** (`E:GetModule("Skins"):
+HandleButton`, pcall-guarded, once per button) — ElvUI doesn't auto-skin a custom
+addon button, so without this it kept the classic look beside a themed dialog.
+`Anchor` parents it to the StaticPopup, sizes/levels it to match the Recap button,
+sits it in the button row, then **`ExtendDialog` grows the popup's width** so our
+button is contained inside the dialog instead of floating off the right edge
+(best-effort + guarded; converges across the OnDeath re-anchor retries). Because
+StaticPopups are **recycled for other prompts**, the original width is tracked and
+**restored on `OnAlive`** (and in `Anchor`'s no-dialog fallback).
 
 ---
 
@@ -297,8 +309,9 @@ Sections top→bottom:
    death** so neither end is flush to an edge; **both margins show a dashed fading
    line** (`tailPool`) — at HP=0 after death, and at the first sample's HP level
    before combat. **Mouse-wheel over the graph ZOOMS** the time window in/out around
-   the cursor (`F.zoomMin/zoomMax`; min visible span **0.05s** so 1.510/1.512/1.515
-   land on distinct points; wheeling fully out restores the full view; reset on every
+   the cursor (`F.zoomMin/zoomMax`; tightest zoom = `MIN_ZOOM_SPAN` **0.5s** visible
+   window, enforced in every zoom path — graph wheel, overview wheel, brush resize;
+   wheeling fully out restores the full view; reset on every
    `Show`) and **click-drag PANS** the zoomed window (or, when fully zoomed out, moves
    the whole window like the title bar) — both on `F.graphOverlay` (`EnableMouse` +
    `RegisterForDrag`; `overlay.panning`/`movingWindow` flags; `GraphTrack` does the
@@ -322,7 +335,7 @@ Sections top→bottom:
    **grave/death marker** (`f.deathMarker`) **in place of a "DEATH" label** — the
    `tt=0` x-tick is skipped; it uses the **`poi-graveyard-neutral` atlas** (a
    tombstone, reliably present) and falls back to the `BDR.DEATH_ICON` texture. (The
-   literal `inv_misc_coffin_01` coffin rendered blank in the client, hence the atlas.)
+   literal `inv_misc_coffin_01` texture rendered blank in the client, hence the atlas.)
    **Event markers = a school-coloured DOT per hit** (`dotPool`: a solid `fill` inside
    a thin dark `border` ring, heals green; radius 5, **KB 7**). NOT spell icons — dots
    were reverted to for a cleaner, consistent timeline (the icons-on-line read as
@@ -338,8 +351,26 @@ Sections top→bottom:
      (signed) / `Hit %:` (its `% Max HP` delta) double-lines. The displayed HP/time use
      the **hit's own** `hpPct`/`t` (so the KB reads its real ~2%, not 0% at death). It
      also drives the scrubber line + marker glow + table-row sync.
+   - **Dotted vertical cursor crosshair** (`ShowCrosshair`/`HideCrosshair` over
+     `f.crosshairPool`): a column of short dashes at the cursor X (a solid texture can't
+     be dashed, so it's pooled dashes — same trick as `tailPool`), redrawn each hover
+     frame. Shown by both `GraphTrack` and the table-row hover sync.
    - **Table→graph sync**: `HoverEvent`/`UnhoverEvent` (table-row hover) light the
-     scrubber + marker glow via `GraphX`/`F.markerPos`.
+     crosshair + marker glow via `GraphX`/`F.markerPos`.
+   - **Overview / zoom-scroll strip** (`f.overview`, height `OVERVIEW_H`, between the
+     x-axis and the table): a compressed stepped HP curve over the **full** extent
+     (`f.ovLinePool`, red) with a draggable **brush** (`f.ovBrush`) over the visible
+     `[zoomMin..zoomMax]` window and dimming (`ovDimL/ovDimR`) on the out-of-view sides.
+     **Drag the brush body to SCROLL (pan), drag an edge grip to ZOOM, or scroll-wheel
+     over the strip to ZOOM** (centred on the cursor, `ov:OnMouseWheel`); if the brush
+     ends up spanning everything, zoom clears (full view). The brush carries centred
+     **◄ ► move-handles** (`ovArrowL/ovArrowR`, atlas `common-icon-back/forwardarrow`
+     with a rotated-arrow fallback) shown only when it's wide enough. The drag modes
+     share `OverviewDrag`, run from an OnUpdate installed only while a drag is live (set
+     in `OverviewDragStart`, cleared in `OverviewDragStop`), re-rendering each frame so
+     the brush tracks the cursor. `RenderOverview` (called at the end of `RenderGraph`)
+     draws the strip + positions the brush, so it mirrors every wheel-zoom too. Hidden
+     when there's no curve.
 4. **Combat event table** — scrollable `UIPanelScrollFrameTemplate`,
    `TL_VISIBLE_ROWS` (**5**) tall (matches `SRC_VISIBLE_ROWS`), **newest first**,
    **damage-only** (heals are filtered out — they stay on the graph). A **borderless
@@ -419,12 +450,11 @@ HP rising; the table filters them out. Each source carries a representative
 1. ✅ Repo scaffolded (SmartLFG layout + tooling).
 2. ✅ CLAUDE.md written.
 3. ✅ `.toc` + Constants + Core skeleton.
-4. ✅ HealthTracker (sampling + snapshot).
-5. ✅ Analyzer (C_DeathRecap → DeathReport + sample report).
-6. ✅ Display (banner, HP graph, timeline, sources, footer) — HP graph included.
-7. ✅ Commands (`/bdr`, `/bdr test`, `/bdr history`, lock/unlock).
-8. ✅ SavedVariables (position, lock, last report) — see `DB_DEFAULTS` in Core.lua.
-9. ✅ `make lint` clean (luacheck, 0 warnings). `make build` produces a correct
+4. ✅ Analyzer (C_DeathRecap → DeathReport + sample report).
+5. ✅ Display (banner, HP graph, timeline, sources, footer) — HP graph included.
+6. ✅ Commands (`/bdr`, `/bdr test`, `/bdr history`, lock/unlock).
+7. ✅ SavedVariables (position, lock, last report) — see `DB_DEFAULTS` in Core.lua.
+8. ✅ `make lint` clean (luacheck, 0 warnings). `make build` produces a correct
    `dist/BetterDeathRecap/` staging tree (zip step needs `zip`; present on CI).
 
 v1 is feature-complete and lint-clean. **Not yet verified in the live client** —

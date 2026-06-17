@@ -5,7 +5,7 @@ local _, BDR = ...
 --   Header (title + scale control + close)
 --   Death summary banner (who/what killed you + amount + overkill)
 --   Health-timeline graph (the hero; curve + event markers + hover sync)
---   Combat event table (scrollable; Time/Ability/Type/Amount/% Max HP, newest top)
+--   Combat event table (scrollable; Time/Event/Source/Damage/Remaining Health, newest top)
 --   Damage sources (per-attacker bars + total)
 --   Encounter footer (difficulty · zone · window)
 -- Variable-count visuals come from small object pools so we never leak frames.
@@ -25,8 +25,10 @@ local HDR_GAP    = 12
 local GRAPH_HDR  = 28          -- header+legend row height; clears the canvas top below it
 local GRAPH_H    = 152         -- HP-graph canvas height (the hero)
 local XAXIS_H    = 14
+local OVERVIEW_H = 34          -- overview/brush strip below the graph (zoom scrollbar)
 local Y_AXIS_MIN   = -5        -- y-axis floor (%) so the death line isn't flush at the bottom
 local GRAPH_PAD    = 0.1       -- seconds of breathing room added BEFORE the first hit AND after death
+local MIN_ZOOM_SPAN = 0.5      -- tightest zoom-in: the visible window can't go below this (seconds)
 local TBL_HDR    = 16          -- table column-header row
 local ROW_H      = 18
 local ROW_GAP    = 1
@@ -279,10 +281,31 @@ end
 
 local RenderGraph   -- forward declaration (GraphTrack re-renders the graph while panning)
 
+-- Dotted vertical cursor crosshair: a column of short dashes at graph-x `gx` (pooled,
+-- redrawn each hover frame — a solid texture can't be dashed, same trick as tailPool).
+local function ShowCrosshair(gx)
+    if not (F and F.crosshairPool and F.graph) then return end
+    PoolReset(F.crosshairPool)
+    local h = (F.mapT and F.mapT.gh) or F.graph:GetHeight()
+    local y = 1
+    while y < h do
+        local d = PoolNext(F.crosshairPool, F.graph)
+        d:SetColorTexture(0.92, 0.92, 0.96, 0.55)
+        d:ClearAllPoints()
+        d:SetPoint("BOTTOMLEFT", F.graph, "BOTTOMLEFT", gx - 0.5, y)
+        d:SetSize(1, 3)          -- 3px dash …
+        y = y + 6                -- … + 3px gap
+    end
+end
+
+local function HideCrosshair()
+    if F and F.crosshairPool then PoolReset(F.crosshairPool) end
+end
+
 local function GraphTrackStop()
     if not (F and F.tracking) then return end
     F.tracking = false
-    F.graphHL:Hide(); F.markerGlow:Hide()
+    HideCrosshair(); F.markerGlow:Hide()
     if F.trackRow then F.trackRow.hl:Hide(); F.trackRow = nil end
     if GameTooltip:GetOwner() == F.graphOverlay then GameTooltip:Hide() end
 end
@@ -325,10 +348,8 @@ local function GraphTrack(overlay)
         if not nd or d < nd then nd, nearest = d, ev end
     end
 
-    -- Scrubber line at the cursor.
-    F.graphHL:ClearAllPoints()
-    F.graphHL:SetPoint("BOTTOMLEFT", F.graph, "BOTTOMLEFT", gx - 0.5, 0)
-    F.graphHL:SetSize(1, m.gh); F.graphHL:Show()
+    -- Dotted crosshair at the cursor.
+    ShowCrosshair(gx)
 
     local hp = StepPctAt(m.curve, relT)   -- stepped, to match the stepped line
     local onHit = nearest and nd <= 14
@@ -384,6 +405,55 @@ local function GraphTrack(overlay)
     GameTooltip:Show()
 end
 
+-- ── Overview / brush (the horizontal zoom-scroll strip below the graph) ──────
+-- The brush mirrors the visible [zoomMin..zoomMax] window over the FULL timeline.
+-- Dragging its body SCROLLS (pans) the zoom; dragging an edge grip RESIZES (zooms).
+-- All three modes share `OverviewDrag`, run from an OnUpdate installed only while a
+-- drag is live. Re-renders the graph each frame so the brush tracks the cursor.
+local function OverviewDrag()
+    if not (F and F.ovDragMode and F.mapT) then return end
+    local m, ov = F.mapT, F.overview
+    local ovW, full = ov:GetWidth(), (m.fullMax - m.fullMin)
+    if ovW <= 0 or full <= 0 then return end
+    local cur = GetCursorPosition() / ov:GetEffectiveScale()
+    local dt  = (cur - F.ovDragStartX) / ovW * full     -- cursor delta → time delta
+    local vMin, vMax = F.ovStartMin, F.ovStartMax
+    if F.ovDragMode == "pan" then
+        local span = vMax - vMin
+        vMin = vMin + dt
+        if vMin < m.fullMin then vMin = m.fullMin end
+        if vMin + span > m.fullMax then vMin = m.fullMax - span end
+        vMax = vMin + span
+    elseif F.ovDragMode == "left" then
+        vMin = math.min(math.max(m.fullMin, vMin + dt), vMax - MIN_ZOOM_SPAN)
+    elseif F.ovDragMode == "right" then
+        vMax = math.max(math.min(m.fullMax, vMax + dt), vMin + MIN_ZOOM_SPAN)
+    end
+    if vMin <= m.fullMin + 1e-3 and vMax >= m.fullMax - 1e-3 then
+        F.zoomMin, F.zoomMax = nil, nil          -- brush spans everything → full view
+    else
+        F.zoomMin, F.zoomMax = vMin, vMax
+    end
+    if RenderGraph then RenderGraph(F.report) end
+end
+
+local function OverviewDragStart(mode)
+    local m = F and F.mapT
+    if not m then return end
+    F.ovDragMode   = mode
+    F.ovDragStartX = GetCursorPosition() / F.overview:GetEffectiveScale()
+    F.ovStartMin   = F.zoomMin or m.fullMin
+    F.ovStartMax   = F.zoomMax or m.fullMax
+    GraphTrackStop()
+    F.overview:SetScript("OnUpdate", function() OverviewDrag() end)
+end
+
+local function OverviewDragStop()
+    if not F then return end
+    F.ovDragMode = nil
+    F.overview:SetScript("OnUpdate", nil)
+end
+
 local function BuildFrame()
     local f = CreateFrame("Frame", "BetterDeathRecapFrame", UIParent, "BackdropTemplate")
     f:SetSize(WINDOW_W, 480)
@@ -414,10 +484,13 @@ local function BuildFrame()
     table.insert(UISpecialFrames, "BetterDeathRecapFrame")  -- close on Escape
 
     -- ── Header ─────────────────────────────────────────────────────────────────
+    -- Anchored FLUSH to the 1px border (offset 1, not 5) so the opaque header strip
+    -- touches the frame edge. Otherwise the translucent (alpha 0.7) background shows
+    -- through the gap and the header reads as "floating".
     local headerBg = f:CreateTexture(nil, "BACKGROUND", nil, 1)
     headerBg:SetColorTexture(0.08, 0.08, 0.10, 1)
-    headerBg:SetPoint("TOPLEFT", 5, -5)
-    headerBg:SetPoint("TOPRIGHT", -5, -5)
+    headerBg:SetPoint("TOPLEFT", 1, -1)
+    headerBg:SetPoint("TOPRIGHT", -1, -1)
     headerBg:SetHeight(TITLE_H)
     local headerLine = f:CreateTexture(nil, "ARTWORK")
     headerLine:SetColorTexture(unpack(BDR.UI.BORDER_GRAY))
@@ -622,10 +695,9 @@ local function BuildFrame()
         return d
     end)
 
-    -- Scrubber line + dot glow (cursor tracking + table→graph sync).
-    f.graphHL = graph:CreateTexture(nil, "OVERLAY", nil, 3)
-    f.graphHL:SetColorTexture(1, 1, 1, 0.28)
-    f.graphHL:Hide()
+    -- Dotted vertical cursor crosshair (the common "hover line" pattern) + dot glow.
+    -- Pooled dashes (ShowCrosshair); follows the cursor and the table→graph hover sync.
+    f.crosshairPool = NewPool(function(parent) return parent:CreateTexture(nil, "OVERLAY", nil, 3) end)
     f.markerGlow = graph:CreateTexture(nil, "OVERLAY", nil, 2)
     f.markerGlow:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
     f.markerGlow:SetBlendMode("ADD")
@@ -667,6 +739,94 @@ local function BuildFrame()
     f.graphOverlay:SetAllPoints(graph)
     f.graphOverlay:SetFrameLevel(graph:GetFrameLevel() + 8)
     f.graphOverlay:SetScript("OnUpdate", function(self) GraphTrack(self) end)
+
+    -- ── Graph overview / zoom-scroll strip ───────────────────────────────────────
+    -- A compressed view of the WHOLE timeline with a draggable "brush" window that
+    -- mirrors the zoomed range. Drag the brush body to SCROLL, drag an edge grip to
+    -- ZOOM. (Mouse-wheel on the main graph still zooms; this is the horizontal scroll.)
+    local yOverview = yCanvas - GRAPH_H - XAXIS_H - 8
+    local ov = CreateFrame("Frame", nil, f, "BackdropTemplate")
+    ov:SetPoint("TOPLEFT", PAD + GUTTER, yOverview)
+    ov:SetSize(graphW, OVERVIEW_H)
+    ov:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8",
+        edgeSize = 1, insets = { left = 1, right = 1, top = 1, bottom = 1 },
+    })
+    ov:SetBackdropColor(unpack(BDR.UI.PANEL_BG))
+    ov:SetBackdropBorderColor(BDR.UI.BORDER_GRAY[1], BDR.UI.BORDER_GRAY[2], BDR.UI.BORDER_GRAY[3], 0.6)
+    ov:SetClipsChildren(true)
+    f.overview = ov
+    f.ovLinePool = NewPool(function(parent) return parent:CreateLine(nil, "ARTWORK") end)
+
+    -- Dim the OUT-of-view ranges (left + right of the brush) so the window pops.
+    f.ovDimL = ov:CreateTexture(nil, "OVERLAY", nil, 1); f.ovDimL:SetColorTexture(0, 0, 0, 0.5)
+    f.ovDimR = ov:CreateTexture(nil, "OVERLAY", nil, 1); f.ovDimR:SetColorTexture(0, 0, 0, 0.5)
+
+    -- The brush (visible-range window): body drag = pan, edge grips = zoom.
+    local brush = CreateFrame("Frame", nil, ov)
+    brush:SetFrameLevel(ov:GetFrameLevel() + 4)
+    brush:EnableMouse(true); brush:RegisterForDrag("LeftButton")
+    f.ovBrush = brush
+    local bfill = brush:CreateTexture(nil, "BACKGROUND")
+    bfill:SetAllPoints(); bfill:SetColorTexture(BDR.UI.GOLD[1], BDR.UI.GOLD[2], BDR.UI.GOLD[3], 0.12)
+    for _, side in ipairs({ "LEFT", "RIGHT" }) do
+        local edge = brush:CreateTexture(nil, "ARTWORK")
+        edge:SetColorTexture(unpack(BDR.UI.GOLD))
+        edge:SetPoint("TOP" .. side); edge:SetPoint("BOTTOM" .. side); edge:SetWidth(2)
+    end
+    brush:SetScript("OnDragStart", function() OverviewDragStart("pan") end)
+    brush:SetScript("OnDragStop", OverviewDragStop)
+    local function MakeGrip(side)
+        local g = CreateFrame("Frame", nil, brush)
+        g:SetSize(9, OVERVIEW_H); g:SetPoint(side, brush, side, 0, 0)
+        g:SetFrameLevel(brush:GetFrameLevel() + 2)
+        g:EnableMouse(true); g:RegisterForDrag("LeftButton")
+        g:SetScript("OnDragStart", function() OverviewDragStart(side == "LEFT" and "left" or "right") end)
+        g:SetScript("OnDragStop", OverviewDragStop)
+    end
+    MakeGrip("LEFT"); MakeGrip("RIGHT")
+
+    -- ◄ ► move-handles in the brush centre, so it's obvious it can be dragged sideways.
+    local function MakeArrow(dir)
+        local a = brush:CreateTexture(nil, "OVERLAY")
+        a:SetSize(9, 9)
+        a:SetVertexColor(unpack(BDR.UI.GOLD))
+        a:SetPoint("CENTER", brush, "CENTER", dir == "left" and -5 or 5, 0)
+        local atlas = (dir == "left") and "common-icon-backarrow" or "common-icon-forwardarrow"
+        if a.SetAtlas and AtlasExists(atlas) then
+            a:SetAtlas(atlas, false)
+        else                                   -- fallback: rotate the classic up-arrow
+            a:SetTexture("Interface\\Buttons\\Arrow-Up-Up")
+            a:SetRotation((dir == "left") and (math.pi / 2) or (-math.pi / 2))
+        end
+        return a
+    end
+    f.ovArrowL = MakeArrow("left")
+    f.ovArrowR = MakeArrow("right")
+
+    -- Scroll-wheel over the overview ZOOMS too (centred on the cursor's spot in the
+    -- strip), mirroring the main graph's wheel-zoom so the brush stays in sync.
+    ov:EnableMouseWheel(true)
+    ov:SetScript("OnMouseWheel", function(self, delta)
+        local m = F.mapT
+        if not (m and F.report) then return end
+        local ovW = self:GetWidth()
+        local ox  = (GetCursorPosition() / self:GetEffectiveScale()) - self:GetLeft()
+        ox = math.max(0, math.min(ovW, ox))
+        local full    = m.fullMax - m.fullMin
+        local cursorT = m.fullMin + (ovW > 0 and ox / ovW or 0.5) * full
+        local curMin  = F.zoomMin or m.fullMin
+        local curMax  = F.zoomMax or m.fullMax
+        local newSpan = math.max(MIN_ZOOM_SPAN, math.min((curMax - curMin) * (delta > 0 and 0.8 or 1.25), full))
+        local newMin  = cursorT - newSpan / 2
+        local newMax  = newMin + newSpan
+        if newMin < m.fullMin then newMin, newMax = m.fullMin, m.fullMin + newSpan end
+        if newMax > m.fullMax then newMax, newMin = m.fullMax, m.fullMax - newSpan end
+        if newMin < m.fullMin then newMin = m.fullMin end
+        if newSpan >= full - 1e-3 then F.zoomMin, F.zoomMax = nil, nil
+        else F.zoomMin, F.zoomMax = newMin, newMax end
+        if RenderGraph then RenderGraph(F.report) end
+    end)
 
     -- ── Combat event table ────────────────────────────────────────────────────────
     f.tableTop = nil  -- set in ResolveLayout()
@@ -710,7 +870,7 @@ local function BuildFrame()
         -- (SetWordWrap false) rather than wrapping to a second line.
         row.time = MakeFontString(row, "GameFontDisableSmall", "LEFT")
         row.time:SetPoint("LEFT", C_TIME_X, 0); row.time:SetWidth(C_TIME_W); row.time:SetWordWrap(false)
-        -- Coffin marker right of the time (snug after "0.0s", not crowding the Event
+        -- Tombstone marker right of the time (snug after "0.0s", not crowding the Event
         -- column), shown ONLY on the killing-blow row.
         row.deathIcon = row:CreateTexture(nil, "ARTWORK")
         row.deathIcon:SetSize(C_DEATH_W, C_DEATH_W)
@@ -865,10 +1025,7 @@ end
 -- marker, and a gold wash on its table row (the addon's core sync feature).
 local function HoverEvent(ev)
     if not (ev and F.mapT) then return end
-    F.graphHL:ClearAllPoints()
-    F.graphHL:SetPoint("BOTTOMLEFT", F.graph, "BOTTOMLEFT", GraphX(ev.t) - 0.5, 0)
-    F.graphHL:SetSize(1, F.mapT.gh)
-    F.graphHL:Show()
+    ShowCrosshair(GraphX(ev.t))
     local pos = F.markerPos and F.markerPos[ev]
     if pos then
         F.markerGlow:ClearAllPoints()
@@ -883,7 +1040,7 @@ local function HoverEvent(ev)
 end
 
 local function UnhoverEvent(ev)
-    F.graphHL:Hide()
+    HideCrosshair()
     F.markerGlow:Hide()
     local row = ev and F.rowOf and F.rowOf[ev]
     if row and not row.isKB then row.hl:Hide() end
@@ -967,13 +1124,69 @@ local function RenderBanner(report)
     end
 end
 
+-- Draw the overview strip: a compressed stepped HP curve across the FULL extent,
+-- plus the brush rectangle over the currently-visible [visMin..visMax] window and the
+-- dimming on either side. Called from RenderGraph (so it tracks every zoom/pan).
+local function RenderOverview(curve, fullMin, fullMax, visMin, visMax)
+    local ov = F.overview
+    if not ov then return end
+    ov:Show()
+    PoolReset(F.ovLinePool)
+    local ovW, ovH = ov:GetWidth(), ov:GetHeight()
+    local fullSpan = fullMax - fullMin
+    if fullSpan <= 0 or ovW <= 0 then return end
+    local pad = 3
+    local function OX(t) return (t - fullMin) / fullSpan * ovW end
+    local function OY(pct) return pad + math.max(0, math.min(100, pct)) / 100 * (ovH - 2 * pad) end
+
+    -- Mini stepped HP curve (red), ignoring zoom — this is the "you are here" map.
+    local c = BDR.UI.DAMAGE
+    for i = 2, #curve do
+        local a, b = curve[i - 1], curve[i]
+        local segs = { { OX(a.t), OY(a.pct), OX(b.t), OY(a.pct) },    -- flat hold
+                       { OX(b.t), OY(a.pct), OX(b.t), OY(b.pct) } }   -- vertical drop
+        for _, s in ipairs(segs) do
+            local line = PoolNext(F.ovLinePool, ov)
+            line:SetThickness(1.5)
+            line:SetColorTexture(c[1], c[2], c[3], 0.85)
+            line:SetStartPoint("BOTTOMLEFT", ov, s[1], s[2])
+            line:SetEndPoint("BOTTOMLEFT", ov, s[3], s[4])
+        end
+    end
+
+    -- Brush over the visible window.
+    local bL = math.max(0, math.min(ovW, OX(visMin)))
+    local bR = math.max(0, math.min(ovW, OX(visMax)))
+    if bR - bL < 6 then bR = math.min(ovW, bL + 6) end
+    F.ovBrush:ClearAllPoints()
+    F.ovBrush:SetPoint("TOPLEFT", ov, "TOPLEFT", bL, 0)
+    F.ovBrush:SetPoint("BOTTOMLEFT", ov, "BOTTOMLEFT", bL, 0)
+    F.ovBrush:SetWidth(bR - bL)
+    -- The ◄ ► move-handles only fit when the brush is wide enough.
+    local showArrows = (bR - bL) >= 22
+    F.ovArrowL:SetShown(showArrows); F.ovArrowR:SetShown(showArrows)
+
+    if bL > 0.5 then
+        F.ovDimL:ClearAllPoints()
+        F.ovDimL:SetPoint("TOPLEFT", ov, "TOPLEFT", 0, 0)
+        F.ovDimL:SetPoint("BOTTOMLEFT", ov, "BOTTOMLEFT", 0, 0)
+        F.ovDimL:SetWidth(bL); F.ovDimL:Show()
+    else F.ovDimL:Hide() end
+    if bR < ovW - 0.5 then
+        F.ovDimR:ClearAllPoints()
+        F.ovDimR:SetPoint("TOPRIGHT", ov, "TOPRIGHT", 0, 0)
+        F.ovDimR:SetPoint("BOTTOMRIGHT", ov, "BOTTOMRIGHT", 0, 0)
+        F.ovDimR:SetWidth(ovW - bR); F.ovDimR:Show()
+    else F.ovDimR:Hide() end
+end
+
 function RenderGraph(report)   -- assigns the forward-declared upvalue (see GraphTrack)
     local graph = F.graph
     PoolReset(F.graphLinePool)
     PoolReset(F.dotPool)
     PoolReset(F.tailPool)
     PoolReset(F.xtickPool)
-    F.graphHL:Hide(); F.markerGlow:Hide(); F.deathMarker:Hide()
+    HideCrosshair(); F.markerGlow:Hide(); F.deathMarker:Hide()
     F.markerPos = {}
     F.trackRow = nil
     F.tracking = false
@@ -986,6 +1199,7 @@ function RenderGraph(report)   -- assigns the forward-declared upvalue (see Grap
             (report.context and report.context.windowSeconds) or BDR.CONFIG.WINDOW_SECONDS))
         F.graphNote:SetText(L.HP_UNAVAILABLE)
         F.graphNote:Show()
+        if F.overview then F.overview:Hide() end   -- no curve → no overview strip
         return
     end
     F.graphNote:Hide()
@@ -1004,7 +1218,7 @@ function RenderGraph(report)   -- assigns the forward-declared upvalue (see Grap
     local visMax   = F.zoomMax or fullMax
     if visMin < fullMin then visMin = fullMin end
     if visMax > fullMax then visMax = fullMax end
-    if visMax - visMin < 0.05 then visMax = visMin + 0.05 end   -- min ~50ms window (see ms-apart hits)
+    if visMax - visMin < MIN_ZOOM_SPAN then visMax = visMin + MIN_ZOOM_SPAN end   -- tightest zoom
     local xMinT    = visMin
     local span     = visMax - visMin
     if span <= 0 then span = 1 end
@@ -1105,6 +1319,9 @@ function RenderGraph(report)   -- assigns the forward-declared upvalue (see Grap
                fullMin = fullMin, fullMax = fullMax,
                hits = report.hits or report.events or {} }
 
+    -- Overview strip + brush, mirroring this zoom window over the full extent.
+    RenderOverview(curve, fullMin, fullMax, visMin, visMax)
+
     -- Mouse-wheel over the graph zooms the time window in/out, centred on the cursor;
     -- wheeling all the way out restores the full view. (Hooked once.)
     if not F.zoomHooked then
@@ -1118,7 +1335,7 @@ function RenderGraph(report)   -- assigns the forward-declared upvalue (see Grap
             gx = math.max(0, math.min(m.gw, gx))
             local cursorT  = gx / m.gw * m.span + m.xMinT
             local fullSpan = m.fullMax - m.fullMin
-            local newSpan  = math.max(0.05, math.min(m.span * (delta > 0 and 0.8 or 1.25), fullSpan))
+            local newSpan  = math.max(MIN_ZOOM_SPAN, math.min(m.span * (delta > 0 and 0.8 or 1.25), fullSpan))
             local frac     = (m.span > 0) and (cursorT - m.xMinT) / m.span or 0.5
             local newMin   = cursorT - frac * newSpan
             local newMax   = newMin + newSpan
@@ -1432,7 +1649,8 @@ local function ResolveLayout()
     local yBanner   = -PAD - TITLE_H
     local yGraphHdr = yBanner - BANNER_H - HDR_GAP
     local yCanvas   = yGraphHdr - GRAPH_HDR
-    F.tableTop = yCanvas - GRAPH_H - XAXIS_H - 12
+    -- graph (GRAPH_H) → x-axis (XAXIS_H) → 8px gap → overview strip (OVERVIEW_H) → 12px
+    F.tableTop = yCanvas - GRAPH_H - XAXIS_H - 8 - OVERVIEW_H - 12
 end
 
 function Display:Show(report)

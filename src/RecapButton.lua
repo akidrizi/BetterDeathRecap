@@ -14,6 +14,47 @@ local RecapButton = {}
 BDR.RecapButton = RecapButton
 
 local btn
+local widenedPopup, widenedBase   -- death dialog we grew + its original width (to restore)
+
+-- Make our button adopt the active theme. ElvUI does NOT auto-skin a custom addon
+-- button, so it would otherwise keep the "classic" look while the rest of the dialog
+-- is themed. We soft-skin it ourselves via ElvUI's own Skins module — dependency-free,
+-- pcall-guarded, no-op without ElvUI, and only once per button.
+local function SkinButton()
+    if not btn or btn.__bdrSkinned or not _G.ElvUI then return end
+    btn.__bdrSkinned = true
+    pcall(function()
+        local E = unpack(_G.ElvUI)
+        local S = E and E.GetModule and E:GetModule("Skins")
+        if S and S.HandleButton then S:HandleButton(btn) end
+    end)
+end
+
+-- StaticPopups are recycled for OTHER prompts, so once our button is gone we must put
+-- the dialog's original width back (else a later "Delete item?" box shows oversized).
+local function RestoreDialog()
+    if widenedPopup and widenedBase then
+        pcall(function() widenedPopup:SetWidth(widenedBase) end)
+    end
+    widenedPopup, widenedBase = nil, nil
+end
+
+-- Grow the death dialog so our button sits INSIDE it (a real element of the dialog)
+-- rather than floating off its right edge. Re-runs across the re-anchor retries and
+-- converges; best-effort + guarded so a StaticPopup quirk can't error the death flow.
+local function ExtendDialog(popup)
+    if not (btn and popup and popup.GetRight) then return end
+    pcall(function()
+        local btnR, popR = btn:GetRight(), popup:GetRight()
+        if not (btnR and popR) then return end   -- coords not resolved yet; a retry will catch it
+        if widenedPopup ~= popup then
+            RestoreDialog()
+            widenedPopup, widenedBase = popup, popup:GetWidth()
+        end
+        local overflow = btnR + 12 - popR
+        if overflow > 0 then popup:SetWidth(popup:GetWidth() + overflow + 8) end
+    end)
+end
 
 -- Build (once) the freshest report we can and show the window. Prefers a live
 -- rebuild from the current recap + the death-time health snapshot, falling back
@@ -98,6 +139,7 @@ end
 -- else off the right edge of the death popup, else a fixed screen fallback.
 local function Anchor()
     EnsureButton()
+    SkinButton()           -- adopt the ElvUI theme (idempotent; no-op without ElvUI)
     btn:ClearAllPoints()
 
     local popup = FindDeathPopup()
@@ -108,18 +150,22 @@ local function Anchor()
         if recap then
             -- Sit in the dialog's button row as the next button: match the Recap
             -- button's size/level and use the same small inter-button gap so the
-            -- row reads Release | Reincarnation | Recap | Better Recap.
+            -- row reads Release | Reincarnation | Recap | Better Recap, then grow the
+            -- dialog so our button is contained WITHIN it (not floating off the edge).
             local w, h = recap:GetSize()
             if w and w > 0 then btn:SetSize(w, h) end
             btn:SetFrameLevel(recap:GetFrameLevel())
             btn:SetPoint("LEFT", recap, "RIGHT", 4, 0)
+            ExtendDialog(popup)
         else
             btn:SetPoint("TOPLEFT", popup, "TOPRIGHT", 6, -10)
         end
         return true
     end
 
-    -- Fallback: a fixed spot near the lower-middle of the screen.
+    -- Fallback: a fixed spot near the lower-middle of the screen (no dialog to attach
+    -- to, so nothing to extend).
+    RestoreDialog()
     btn:SetParent(UIParent)
     btn:SetPoint("CENTER", UIParent, "CENTER", 0, -180)
     return false
@@ -139,6 +185,7 @@ end
 
 function RecapButton:OnAlive()
     if btn then btn:Hide() end
+    RestoreDialog()   -- put the recycled StaticPopup back to its original width
 end
 
 -- ── Diagnostic (/bdr btn) — run it WHILE the death dialog is up ───────────────

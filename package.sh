@@ -94,6 +94,7 @@ EXCLUDES=(
     'pkgmeta.yaml'
     '*.zip'
     '*.tar.gz'
+    '*.svg'          # design mocks only — WoW can't load SVG (e.g. media/betterdeathrecap_icon.svg)
 )
 
 # Copy the source tree into staging, honoring EXCLUDES (rsync, with a tar

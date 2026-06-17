@@ -106,7 +106,6 @@ frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("PLAYER_DEAD")
 frame:RegisterEvent("PLAYER_ALIVE")
 frame:RegisterEvent("PLAYER_UNGHOST")
-frame:RegisterUnitEvent("UNIT_HEALTH", "player")
 
 frame:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" then
@@ -118,15 +117,9 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         end
 
     elseif event == "PLAYER_ENTERING_WORLD" then
-        -- New world/instance: any buffered health is stale relative to the
-        -- fresh fight, so start clean.
-        BDR.HealthTracker:Clear()
         -- Re-place the minimap button now that ALL addons have loaded (a square-
         -- minimap addon may define GetMinimapShape() only after our ADDON_LOADED).
         if BDR.Minimap then BDR.Minimap:Reposition() end
-
-    elseif event == "UNIT_HEALTH" then
-        BDR.HealthTracker:Sample()
 
     elseif event == "PLAYER_DEAD" then
         OnPlayerDead()

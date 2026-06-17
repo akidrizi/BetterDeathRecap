@@ -41,15 +41,18 @@ implausible (> 1.5× the unit max) we fall back to the unit max, and never let t
 denominator drop below the peak observed HP. See `Analyzer.BuildRecapCurve`.
 
 ### What a "recap" IS (confirmed) — a fixed-COUNT buffer, not a time window
-`GetRecapEvents` returns the **last N damage events** the player took (observed
-N=10), **not** a time window and **not** combat-bounded. If the fatal fight had
-fewer than N damage events, the buffer is padded with leftovers from an EARLIER
-fight — seen as a large time gap (e.g. 6 events at 0…-6s, then a 73s jump to 4
-events at -79…-82s from a previous death). Blizzard's own UI avoids this by only
-showing the last ~5 and assuming they're recent.
-→ We trim to the fatal fight via gap detection: keep only the most-recent
-contiguous cluster, cutting at the first inter-event gap > `FIGHT_GAP_SECONDS`
-(Constants, default 10s). See `Analyzer:Build`.
+`GetRecapEvents(id)` returns the recap event list for that death — the SAME events
+Blizzard's own death-recap UI shows. It can legitimately span a long window (a death
+recap of **17s** was observed), so it is **not** a fixed short time window.
+→ **We render ALL of them, to match Blizzard exactly.** An earlier build applied a
+gap-detection trim (cut at the first inter-event gap > `FIGHT_GAP_SECONDS`, default
+10s) on the theory that the buffer padded the fatal fight with leftovers from an
+earlier death. That trim **lost data** — it dropped the oldest hits and shrank our
+window to ~9s while Blizzard showed 17s — so it was **removed** (`FIGHT_GAP_SECONDS`
+and the per-fight clustering are gone; `MAX_TIMELINE` row-cap removed too). If a
+future death ever shows a genuinely stale prior-fight event that Blizzard omits,
+diagnose with `/bdr dump` and match Blizzard's filtering precisely rather than
+reintroducing a blunt time-gap cut.
 
 ### More confirmed field details
 - `overkill` / `absorbed` use **-1 as a "none" sentinel** (also: only treat > 0

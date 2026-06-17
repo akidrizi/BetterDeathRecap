@@ -26,12 +26,9 @@ globals = {
     -- Death Recap API — the data source this addon renders
     "C_DeathRecap",
 
-    -- Unit / health queries (HealthTracker sampling)
-    "UnitHealth",
+    -- Unit / health queries
     "UnitHealthMax",
-    "UnitGUID",
     "UnitName",
-    "UnitExists",
     "GetRealmName",
 
     -- Spell info (icon swatches + names in the timeline)
@@ -43,7 +40,6 @@ globals = {
     "C_Texture",
 
     -- Death recap probing / on-death button anchoring
-    "DEATHRECAP_NUM_RECAPS",
     "STATICPOPUP_NUMDIALOGS",
     "RECAP",
     "_G",
@@ -54,10 +50,8 @@ globals = {
     -- World / context info (footer line)
     "GetRealZoneText",
     "GetInstanceInfo",
-    "GetDifficultyInfo",
 
     -- Lua/WoW table helpers injected globally by the client
-    "wipe",
     "strsplit",
 
     -- UI / frame
@@ -76,8 +70,6 @@ globals = {
     "GameFontHighlight",
     "GameFontHighlightSmall",
     "GameFontDisableSmall",
-    "NORMAL_FONT_COLOR",
-    "BackdropTemplateMixin",
 
     -- C_* namespaces
     "C_AddOns",

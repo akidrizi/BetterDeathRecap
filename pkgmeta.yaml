@@ -18,3 +18,4 @@ ignore:
   - package.sh
   - "*.zip"
   - "*.tar.gz"
+  - "*.svg"   # design mocks only — WoW can't load SVG (e.g. media/betterdeathrecap_icon.svg)

@@ -205,28 +205,15 @@ function Analyzer:DumpEvents()
     for _, ev in ipairs(raw) do
         if type(ev.timestamp) == "number" and ev.timestamp > deathT then deathT = ev.timestamp end
     end
-    -- Where does the report cut? Same gap rule as Build: walk from newest (the
-    -- raw list is newest-first) and stop at the first gap > FIGHT_GAP_SECONDS.
-    local gap = BDR.CONFIG.FIGHT_GAP_SECONDS or 10
-    local kept = #raw
-    for i = 2, #raw do
-        local newer = raw[i - 1].timestamp or 0
-        local older = raw[i].timestamp or 0
-        if type(newer) == "number" and type(older) == "number" and (newer - older) > gap then
-            kept = i - 1
-            break
-        end
-    end
 
-    lines[#lines + 1] = ("recap id=%s  maxHP=%s  events=%d  (report uses the %d most recent — RAW below)"):format(
-        tostring(id), tostring(SafeCall(C_DeathRecap.GetRecapMaxHealth, id)), #raw, kept)
+    lines[#lines + 1] = ("recap id=%s  maxHP=%s  events=%d  (ALL shown — full recap, like Blizzard)"):format(
+        tostring(id), tostring(SafeCall(C_DeathRecap.GetRecapMaxHealth, id)), #raw)
     for i, ev in ipairs(raw) do
         local ok, line = pcall(function()
             local rel = (type(ev.timestamp) == "number" and deathT > 0) and (ev.timestamp - deathT) or 0
-            local tag = (i <= kept) and "" or "  <prev fight, trimmed>"
-            return string.format("#%d t=%.1fs amt=%s ok=%s hp=%s | %s | %s%s",
+            return string.format("#%d t=%.1fs amt=%s ok=%s hp=%s | %s | %s",
                 i, rel, tostring(ev.amount), tostring(ev.overkill), tostring(ev.currentHP),
-                tostring(ev.event), tostring(ev.sourceName), tag)
+                tostring(ev.event), tostring(ev.sourceName))
         end)
         lines[#lines + 1] = ok and line or ("#" .. i .. " <event unreadable>")
     end
@@ -445,31 +432,11 @@ function Analyzer:Build()
         for _, ev in ipairs(allEvents) do ev.t = ev.t or 0 end
     end
 
-    -- Trim to the fight that actually killed us. The recap is a fixed-COUNT
-    -- buffer, so older events from a previous fight can trail behind a big time
-    -- gap. allEvents is ascending by time; walk back from death and cut at the
-    -- first gap larger than FIGHT_GAP_SECONDS.
-    do
-        local gap = BDR.CONFIG.FIGHT_GAP_SECONDS or 10
-        local startIdx = 1
-        for i = #allEvents, 2, -1 do
-            if (allEvents[i].t - allEvents[i - 1].t) > gap then
-                startIdx = i
-                break
-            end
-        end
-        if startIdx > 1 then
-            local kept = {}
-            for i = startIdx, #allEvents do kept[#kept + 1] = allEvents[i] end
-            allEvents = kept
-        end
-    end
-
-    -- Re-derive the damage subset from the trimmed events (excludes prior fights).
-    dmg = {}
-    for _, ev in ipairs(allEvents) do
-        if ev.kind == "damage" and ev.amount > 0 then dmg[#dmg + 1] = ev end
-    end
+    -- NO fight-gap trimming. C_DeathRecap.GetRecapEvents already returns exactly the
+    -- events Blizzard's own death recap shows for THIS death, so we render ALL of them
+    -- to match it. (An earlier gap-based trim dropped the oldest hits and shrank the
+    -- window — e.g. showed 9s when Blizzard showed 17s. That was data loss.) `dmg` is
+    -- already the complete, time-sorted damage subset built above.
 
     -- Curve events: those carrying a health reading, in time order.
     local curveEvents = {}
@@ -484,8 +451,8 @@ function Analyzer:Build()
     local window = math.max(3, math.ceil(-oldestT))
 
     -- Full event list (every damage AND heal in the fight, chronological) — the
-    -- table lists these and the graph marks them. `kind` drives the Type column /
-    -- marker shape (damage = red circle, heal = green triangle).
+    -- table lists the damage ones and the graph marks them all. `kind` drives the
+    -- graph dot colour (damage = school colour, heal = green).
     local hits = {}
     for _, ev in ipairs(allEvents) do
         if (ev.kind == "damage" or ev.kind == "heal") and (ev.amount or 0) > 0 then
@@ -509,16 +476,9 @@ function Analyzer:Build()
         end
     end
 
-    -- Timeline rows are capped to fit the right column (oldest rows drop, but the
-    -- killing blow is last so it always survives). The graph still marks every hit.
+    -- Every hit is rendered (the table scrolls) — no row cap, so we list the same
+    -- events as Blizzard's recap rather than dropping the oldest.
     local timeline = hits
-    local maxRows = BDR.CONFIG.MAX_TIMELINE
-    if #hits > maxRows then
-        timeline = {}
-        for i = #hits - maxRows + 1, #hits do
-            timeline[#timeline + 1] = hits[i]
-        end
-    end
 
     -- Real max health for the curve denominator (fixes the "always starts at 100%"
     -- bug when the fight opened below full HP). GetRecapMaxHealth is reliable on the
@@ -603,8 +563,8 @@ function Analyzer:SampleReport()
         { t = 0,     pct = 0   },  -- death
     }
 
-    -- Chronological (oldest → newest); the killing blow is last, at t = 0. Eight
-    -- hits so the table overflows its viewport and shows the "Scroll for more" hint.
+    -- Chronological (oldest → newest); the killing blow is last, at t = 0. More than
+    -- the 5-row viewport so the table scrolls (exercises the scrollbar in /bdr test).
     local function H(t, source, spell, id, amount, school, extra)
         local h = { t = t, kind = "damage", sourceName = source, spellName = spell,
                     spellID = id, amount = amount, school = school }
