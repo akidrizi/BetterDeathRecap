@@ -14,7 +14,9 @@ local RecapButton = {}
 BDR.RecapButton = RecapButton
 
 local btn
-local widenedPopup, widenedBase   -- death dialog we grew + its original width (to restore)
+-- The death dialog we grew: its original width + anchor points, so we can put it back
+-- (StaticPopups are recycled for other prompts).
+local widenedPopup, widenedBase, widenedPoints
 
 -- Make our button adopt the active theme. ElvUI does NOT auto-skin a custom addon
 -- button, so it would otherwise keep the "classic" look while the rest of the dialog
@@ -30,29 +32,58 @@ local function SkinButton()
     end)
 end
 
--- StaticPopups are recycled for OTHER prompts, so once our button is gone we must put
--- the dialog's original width back (else a later "Delete item?" box shows oversized).
+-- Put the recycled StaticPopup back to its original width AND anchor points (else a
+-- later "Delete item?" box shows oversized / mis-positioned).
 local function RestoreDialog()
-    if widenedPopup and widenedBase then
-        pcall(function() widenedPopup:SetWidth(widenedBase) end)
+    if widenedPopup then
+        pcall(function()
+            if widenedBase then widenedPopup:SetWidth(widenedBase) end
+            if widenedPoints then
+                widenedPopup:ClearAllPoints()
+                for _, p in ipairs(widenedPoints) do widenedPopup:SetPoint(unpack(p)) end
+            end
+        end)
     end
-    widenedPopup, widenedBase = nil, nil
+    widenedPopup, widenedBase, widenedPoints = nil, nil, nil
 end
 
--- Grow the death dialog so our button sits INSIDE it (a real element of the dialog)
--- rather than floating off its right edge. Re-runs across the re-anchor retries and
--- converges; best-effort + guarded so a StaticPopup quirk can't error the death flow.
-local function ExtendDialog(popup)
-    if not (btn and popup and popup.GetRight) then return end
+-- Grow the dialog's width just enough to contain our button. Re-applied every tick
+-- (see EnsureButton's OnUpdate) because the release countdown re-sizes the dialog as
+-- its text changes, which would otherwise snap the width back and re-expose the button.
+-- A sanity cap stops runaway growth if the dialog ever loses our left-edge pin.
+local function EnforceDialogWidth()
+    if not (btn and widenedPopup) then return end
     pcall(function()
-        local btnR, popR = btn:GetRight(), popup:GetRight()
-        if not (btnR and popR) then return end   -- coords not resolved yet; a retry will catch it
-        if widenedPopup ~= popup then
-            RestoreDialog()
-            widenedPopup, widenedBase = popup, popup:GetWidth()
+        local r, pr = btn:GetRight(), widenedPopup:GetRight()
+        if not (r and pr) then return end
+        local overflow = r + 12 - pr
+        if overflow > 0 and widenedPopup:GetWidth() + overflow <= (widenedBase or 0) + 240 then
+            widenedPopup:SetWidth(widenedPopup:GetWidth() + overflow)
         end
-        local overflow = btnR + 12 - popR
-        if overflow > 0 then popup:SetWidth(popup:GetWidth() + overflow + 8) end
+    end)
+end
+
+-- Make our button sit INSIDE the dialog. StaticPopups are TOP-anchored, so a plain
+-- SetWidth grows them SYMMETRICALLY — the button (anchored within the dialog) moves
+-- out with it and the overflow never closes. So we PIN the dialog's left edge once
+-- (re-anchor its TOPLEFT to its current screen position); after that, growth is purely
+-- rightward and `EnforceDialogWidth` can close the gap. Guarded so a quirk can't error.
+local function ExtendDialog(popup)
+    if not (btn and popup and popup.GetWidth) then return end
+    pcall(function()
+        if widenedPopup ~= popup then
+            local l, t = popup:GetLeft(), popup:GetTop()
+            if not (l and t) then return end   -- not positioned yet; a retry will pin it
+            RestoreDialog()
+            local pts = {}
+            for i = 1, (popup.GetNumPoints and popup:GetNumPoints() or 0) do
+                pts[i] = { popup:GetPoint(i) }
+            end
+            widenedPopup, widenedBase, widenedPoints = popup, popup:GetWidth(), pts
+            popup:ClearAllPoints()
+            popup:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", l, t)   -- pin left → grow right
+        end
+        EnforceDialogWidth()
     end)
 end
 
@@ -81,6 +112,13 @@ local function EnsureButton()
     btn:SetFrameStrata("FULLSCREEN_DIALOG")
     btn:Hide()
     btn:SetScript("OnClick", OpenReport)
+    -- While shown, keep the dialog wide enough to contain us (throttled) — the release
+    -- countdown re-sizes the dialog as its text ticks, which would otherwise re-expose
+    -- the button. OnUpdate only fires while shown, so it idles after OnAlive hides us.
+    btn:SetScript("OnUpdate", function(self, elapsed)
+        self.bdrEnforceT = (self.bdrEnforceT or 0) + elapsed
+        if self.bdrEnforceT >= 0.1 then self.bdrEnforceT = 0; EnforceDialogWidth() end
+    end)
     return btn
 end
 

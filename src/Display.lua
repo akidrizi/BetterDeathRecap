@@ -18,7 +18,7 @@ local L = BDR.L  -- Locale.lua loads before Display.lua, so BDR.L is ready here.
 -- ── layout constants (vertical stack, top → bottom) ──────────────────────────
 local WINDOW_W   = 560
 local PAD        = 12
-local GUTTER     = 32          -- left margin reserved for the health-% axis labels
+local GUTTER     = 0           -- (was the health-% axis-label margin; labels removed → reclaimed)
 local TITLE_H    = 26
 local BANNER_H   = 46
 local HDR_GAP    = 12
@@ -27,8 +27,10 @@ local GRAPH_H    = 152         -- HP-graph canvas height (the hero)
 local XAXIS_H    = 14
 local OVERVIEW_H = 34          -- overview/brush strip below the graph (zoom scrollbar)
 local Y_AXIS_MIN   = -5        -- y-axis floor (%) so the death line isn't flush at the bottom
-local GRAPH_PAD    = 0.1       -- seconds of breathing room added BEFORE the first hit AND after death
+local Y_AXIS_MAX   = 105       -- y-axis ceiling (%) so the 100% line has headroom (not flush at top)
+local GRAPH_PAD    = 0.2       -- seconds of breathing room added BEFORE the first hit AND after death
 local MIN_ZOOM_SPAN = 0.5      -- tightest zoom-in: the visible window can't go below this (seconds)
+local DOT_TEX = "Interface\\COMMON\\Indicator-Gray"  -- a REAL filled circle (tintable) for graph dots
 local TBL_HDR    = 16          -- table column-header row
 local ROW_H      = 18
 local ROW_GAP    = 1
@@ -306,6 +308,7 @@ local function GraphTrackStop()
     if not (F and F.tracking) then return end
     F.tracking = false
     HideCrosshair(); F.markerGlow:Hide()
+    if F.hoverDot then F.hoverDot:Hide() end
     if F.trackRow then F.trackRow.hl:Hide(); F.trackRow = nil end
     if GameTooltip:GetOwner() == F.graphOverlay then GameTooltip:Hide() end
 end
@@ -352,6 +355,14 @@ local function GraphTrack(overlay)
     ShowCrosshair(gx)
 
     local hp = StepPctAt(m.curve, relT)   -- stepped, to match the stepped line
+
+    -- Small dot where the crosshair meets the HP line (the value point under the cursor).
+    local hpY = (math.max(Y_AXIS_MIN, math.min(Y_AXIS_MAX, hp)) - Y_AXIS_MIN)
+                / (Y_AXIS_MAX - Y_AXIS_MIN) * m.gh
+    F.hoverDot:ClearAllPoints()
+    F.hoverDot:SetPoint("CENTER", F.graph, "BOTTOMLEFT", gx, hpY)
+    F.hoverDot:Show()
+
     local onHit = nearest and nd <= 14
     local newRow = (onHit and F.rowOf) and F.rowOf[nearest] or nil
     if F.trackRow and F.trackRow ~= newRow then F.trackRow.hl:Hide(); F.trackRow = nil end
@@ -372,7 +383,15 @@ local function GraphTrack(overlay)
     -- On a dot, report the hit's OWN time/HP (its pre-hit currentHP — e.g. the KB's
     -- real ~2%, not the 0% at death); off a dot, report the cursor's stepped HP.
     local hpR = math.floor(((onHit and (nearest.hpPct or StepPctAt(m.curve, nearest.t))) or hp) + 0.5)
-    GameTooltip:SetOwner(overlay, "ANCHOR_CURSOR_RIGHT")
+    -- Pin the tooltip to the graph's TOP edge at the cursor's X — it follows the line
+    -- horizontally instead of floating with the cursor (like the table's row tooltip).
+    GameTooltip:SetOwner(overlay, "ANCHOR_NONE")
+    GameTooltip:ClearAllPoints()
+    if gx < m.gw * 0.5 then
+        GameTooltip:SetPoint("BOTTOMLEFT", F.graph, "TOPLEFT", gx, 6)
+    else
+        GameTooltip:SetPoint("BOTTOMRIGHT", F.graph, "TOPLEFT", gx, 6)
+    end
     -- Minimal line (default yellow): the killing blow gets its own callout, every
     -- other point shows seconds-before-death + HP. (NOT "seconds into combat".)
     if onHit and nearest.isKillingBlow then
@@ -567,10 +586,12 @@ local function BuildFrame()
     scaleLabel:SetText(L.SCALE_LABEL .. ":")
 
     -- ── Death summary banner ─────────────────────────────────────────────────────
-    local yBanner = -PAD - TITLE_H
+    -- Flush to the header bottom (no gap) and to the left/right borders (offset 1, like
+    -- the header), so it spans edge-to-edge directly under the title bar.
+    local yBanner = -1 - TITLE_H
     local banner = CreateFrame("Frame", nil, f)
-    banner:SetPoint("TOPLEFT", PAD, yBanner)
-    banner:SetPoint("TOPRIGHT", -PAD, yBanner)
+    banner:SetPoint("TOPLEFT", 1, yBanner)
+    banner:SetPoint("TOPRIGHT", -1, yBanner)
     banner:SetHeight(BANNER_H)
     local bb = banner:CreateTexture(nil, "BACKGROUND")
     bb:SetAllPoints()
@@ -582,7 +603,7 @@ local function BuildFrame()
     -- (No big right-side portrait model: a 3D model can render OVER the 2D
     -- amount/overkill text. The SOURCE portrait is the small one over the icon below.)
     f.bannerIcon = banner:CreateTexture(nil, "ARTWORK")
-    f.bannerIcon:SetSize(32, 32)
+    f.bannerIcon:SetSize(40, 40)   -- larger: fills more of the banner; still square
     f.bannerIcon:SetPoint("LEFT", 12, 0)
     f.bannerIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
     local ibOuter = banner:CreateTexture(nil, "BACKGROUND")  -- dark outer outline + spacing
@@ -594,27 +615,32 @@ local function BuildFrame()
     ib:SetPoint("TOPLEFT", f.bannerIcon, "TOPLEFT", -2, 2)
     ib:SetPoint("BOTTOMRIGHT", f.bannerIcon, "BOTTOMRIGHT", 2, -2)
 
-    -- The "KILLED BY" icon represents the SOURCE: a creature's portrait (best-effort
-    -- model over the icon) for mob deaths, or the env icon / spell icon underneath.
+    -- The SOURCE portrait = the STOCK 2D unit-frame face, drawn on top of the spell/env
+    -- icon (which shows through as the fallback). The PlayerModel below is now just an
+    -- invisible (alpha-0) resolver for the creature's displayID — see SetCreaturePortrait.
+    f.bannerPortrait = banner:CreateTexture(nil, "ARTWORK", nil, 2)
+    f.bannerPortrait:SetPoint("TOPLEFT", f.bannerIcon, "TOPLEFT", 0, 0)
+    f.bannerPortrait:SetPoint("BOTTOMRIGHT", f.bannerIcon, "BOTTOMRIGHT", 0, 0)
+    f.bannerPortrait:Hide()
     f.bannerSourceModel = CreateFrame("PlayerModel", nil, banner)
-    f.bannerSourceModel:SetPoint("TOPLEFT", f.bannerIcon, "TOPLEFT", 0, 0)
-    f.bannerSourceModel:SetPoint("BOTTOMRIGHT", f.bannerIcon, "BOTTOMRIGHT", 0, 0)
+    f.bannerSourceModel:SetAllPoints(f.bannerIcon)
     f.bannerSourceModel:SetFrameLevel(banner:GetFrameLevel() + 3)
+    f.bannerSourceModel:SetAlpha(0)
     f.bannerSourceModel:Hide()
 
     -- Left block: KILLED BY (top) + killer • spell (below). Its TOP is aligned with
     -- the Damage number's top on the right (both at banner top -6); each carries a
     -- second line stacked below.
     -- Anchored to the banner top (not the icon) so its top edge matches the Damage
-    -- number's top on the right; x sits just past the 32px icon (12 + 32 + 12).
+    -- number's top on the right; x sits just past the 40px icon (12 + 40 + outline + gap).
     f.bannerKilledBy = MakeFontString(banner, "GameFontDisableSmall", "LEFT")
-    f.bannerKilledBy:SetPoint("TOPLEFT", banner, "TOPLEFT", 56, -6)
+    f.bannerKilledBy:SetPoint("TOPLEFT", banner, "TOPLEFT", 62, -6)
     f.bannerKilledBy:SetText(ColorOf(BDR.UI.DAMAGE) .. L.KILLED_BY .. "|r")
 
     -- The killer • spell (left) and the overkill line (right) are BOTH bottom-anchored
     -- to the banner so they share one baseline (Source/Spell aligned with overkill).
     f.bannerSource = MakeFontString(banner, "GameFontNormal", "LEFT")
-    f.bannerSource:SetPoint("BOTTOMLEFT", banner, "BOTTOMLEFT", 56, 7)
+    f.bannerSource:SetPoint("BOTTOMLEFT", banner, "BOTTOMLEFT", 62, 7)
 
     -- Right block: Damage (top) + overkill (bottom-aligned with killer • spell).
     f.bannerAmount = MakeFontString(banner, "GameFontNormalLarge", "RIGHT")
@@ -664,34 +690,31 @@ local function BuildFrame()
     canvas:SetAllPoints()
     canvas:SetColorTexture(unpack(BDR.UI.PANEL_BG))
 
-    -- Y axis: 0–100% labels only (gridlines removed — keep just the HP line). HP
-    -- maps into [Y_AXIS_MIN..100], so 0% sits a touch above the bottom edge. Labels
-    -- are children of `f` (anchored to the graph) so the graph's clip doesn't hide them.
-    local function YPos(pct) return (pct - Y_AXIS_MIN) / (100 - Y_AXIS_MIN) * GRAPH_H end
-    for _, pct in ipairs({ 0, 25, 50, 75, 100 }) do
-        local lbl = MakeFontString(f, "GameFontDisableSmall", "RIGHT")
-        lbl:SetPoint("RIGHT", graph, "BOTTOMLEFT", -4, YPos(pct))
-        lbl:SetText(pct .. "%")
-        lbl:SetTextColor(unpack(BDR.UI.TEXT_DIM))
-    end
+    -- No Y-axis labels (removed) — HP maps into [Y_AXIS_MIN..Y_AXIS_MAX], so 0% sits a
+    -- touch above the bottom and 100% a touch below the top. The width those labels
+    -- used to reserve (GUTTER) is reclaimed by the graph + overview strip.
 
     f.graphLinePool = NewPool(function(parent) return parent:CreateLine(nil, "OVERLAY") end)
 
     -- Post-death dashed fading tail (so the killing-blow dot isn't flush right).
     f.tailPool = NewPool(function(parent) return parent:CreateTexture(nil, "ARTWORK", nil, 2) end)
 
-    -- Event markers: a school-coloured DOT on the line (heals green), with a thin dark
-    -- ring so it reads against the curve; the KB dot is bigger. (`fill` is a solid
-    -- colour, not a spell icon — reverted to dots for a cleaner, consistent timeline.)
+    -- Event markers: a small school-coloured ROUND dot on the line (heals green) with a
+    -- thin dark ring; the KB dot is a bit bigger. Uses a REAL circular texture (DOT_TEX)
+    -- — NOT SetMask (masking didn't render on the live client and left the "yellow
+    -- squares"). `fill` is tinted to the school colour via SetVertexColor in RenderGraph;
+    -- the dark `border` is 1px larger and sits behind, giving a thin ring.
     f.dotPool = NewPool(function(parent)
         local d = CreateFrame("Frame", nil, parent)
         d:SetFrameLevel(parent:GetFrameLevel() + 4)
-        d.border = d:CreateTexture(nil, "ARTWORK", nil, 0)   -- dark ring behind the fill
-        d.border:SetColorTexture(0, 0, 0, 0.85)
-        d.border:SetAllPoints()
-        d.fill = d:CreateTexture(nil, "ARTWORK", nil, 1)      -- the school-coloured dot, inset 1px
-        d.fill:SetPoint("TOPLEFT", 1, -1)
-        d.fill:SetPoint("BOTTOMRIGHT", -1, 1)
+        d.border = d:CreateTexture(nil, "ARTWORK", nil, 0)
+        d.border:SetTexture(DOT_TEX)
+        d.border:SetVertexColor(0, 0, 0, 0.9)
+        d.border:SetPoint("TOPLEFT", -1, 1)
+        d.border:SetPoint("BOTTOMRIGHT", 1, -1)
+        d.fill = d:CreateTexture(nil, "ARTWORK", nil, 1)
+        d.fill:SetTexture(DOT_TEX)
+        d.fill:SetAllPoints()
         return d
     end)
 
@@ -703,6 +726,19 @@ local function BuildFrame()
     f.markerGlow:SetBlendMode("ADD")
     f.markerGlow:SetVertexColor(unpack(BDR.UI.GOLD))
     f.markerGlow:Hide()
+
+    -- A tiny dot that rides the HP line where the crosshair (dotted cursor line) meets
+    -- it, marking the exact point under the cursor. (Round, real texture — same DOT_TEX.)
+    f.hoverDot = CreateFrame("Frame", nil, graph)
+    f.hoverDot:SetFrameLevel(graph:GetFrameLevel() + 6)
+    f.hoverDot:SetSize(7, 7)
+    local hdBorder = f.hoverDot:CreateTexture(nil, "OVERLAY", nil, 4)
+    hdBorder:SetTexture(DOT_TEX); hdBorder:SetVertexColor(0, 0, 0, 0.9)
+    hdBorder:SetPoint("TOPLEFT", -1, 1); hdBorder:SetPoint("BOTTOMRIGHT", 1, -1)
+    f.hoverDot.fill = f.hoverDot:CreateTexture(nil, "OVERLAY", nil, 5)
+    f.hoverDot.fill:SetTexture(DOT_TEX); f.hoverDot.fill:SetAllPoints()
+    f.hoverDot.fill:SetVertexColor(1, 1, 1, 1)
+    f.hoverDot:Hide()
 
     f.graphNote = MakeFontString(graph, "GameFontDisableSmall", "CENTER")
     f.graphNote:SetPoint("CENTER", graph, "CENTER", 0, 0)
@@ -762,7 +798,9 @@ local function BuildFrame()
     f.ovDimL = ov:CreateTexture(nil, "OVERLAY", nil, 1); f.ovDimL:SetColorTexture(0, 0, 0, 0.5)
     f.ovDimR = ov:CreateTexture(nil, "OVERLAY", nil, 1); f.ovDimR:SetColorTexture(0, 0, 0, 0.5)
 
-    -- The brush (visible-range window): body drag = pan, edge grips = zoom.
+    -- The brush (visible-range window): body drag = pan ONLY. Zoom is the scroll-wheel
+    -- (graph or this strip) — NO edge-resize grips, because players kept accidentally
+    -- resizing when they meant to scroll.
     local brush = CreateFrame("Frame", nil, ov)
     brush:SetFrameLevel(ov:GetFrameLevel() + 4)
     brush:EnableMouse(true); brush:RegisterForDrag("LeftButton")
@@ -776,15 +814,6 @@ local function BuildFrame()
     end
     brush:SetScript("OnDragStart", function() OverviewDragStart("pan") end)
     brush:SetScript("OnDragStop", OverviewDragStop)
-    local function MakeGrip(side)
-        local g = CreateFrame("Frame", nil, brush)
-        g:SetSize(9, OVERVIEW_H); g:SetPoint(side, brush, side, 0, 0)
-        g:SetFrameLevel(brush:GetFrameLevel() + 2)
-        g:EnableMouse(true); g:RegisterForDrag("LeftButton")
-        g:SetScript("OnDragStart", function() OverviewDragStart(side == "LEFT" and "left" or "right") end)
-        g:SetScript("OnDragStop", OverviewDragStop)
-    end
-    MakeGrip("LEFT"); MakeGrip("RIGHT")
 
     -- ◄ ► move-handles in the brush centre, so it's obvious it can be dragged sideways.
     local function MakeArrow(dir)
@@ -964,12 +993,17 @@ local function BuildFrame()
         row.icon:SetSize(SRC_ROW_H - 4, SRC_ROW_H - 4)
         row.icon:SetPoint("LEFT", 2, 0)
         row.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
-        -- Source PORTRAIT (a frozen creature model over the icon; spell/env icon shows
-        -- underneath as a fallback). Set in RenderSources from the source's GUID.
+        -- Source PORTRAIT = the STOCK 2D unit-frame face over the icon (spell/env icon
+        -- shows underneath as a fallback). `row.portrait` is now just the invisible
+        -- displayID resolver; `row.portrait2D` is the painted 2D portrait.
+        row.portrait2D = row:CreateTexture(nil, "ARTWORK", nil, 2)
+        row.portrait2D:SetPoint("TOPLEFT", row.icon, "TOPLEFT", 0, 0)
+        row.portrait2D:SetPoint("BOTTOMRIGHT", row.icon, "BOTTOMRIGHT", 0, 0)
+        row.portrait2D:Hide()
         row.portrait = CreateFrame("PlayerModel", nil, row)
-        row.portrait:SetPoint("TOPLEFT", row.icon, "TOPLEFT", 0, 0)
-        row.portrait:SetPoint("BOTTOMRIGHT", row.icon, "BOTTOMRIGHT", 0, 0)
+        row.portrait:SetAllPoints(row.icon)
         row.portrait:SetFrameLevel(row:GetFrameLevel() + 2)
+        row.portrait:SetAlpha(0)
         row.portrait:Hide()
         row.amount = MakeFontString(row, "GameFontHighlightSmall", "RIGHT")
         row.amount:SetPoint("RIGHT", -6, 0); row.amount:SetWidth(82)
@@ -1048,54 +1082,62 @@ end
 
 -- ── rendering ────────────────────────────────────────────────────────────────
 
--- Best-effort creature portrait. The recap event's sourceGUID encodes the
--- creatureID (Creature-0-server-instance-zone-ID-spawn); we feed it to a model.
--- Many deaths give no usable creatureID (environmental, players, missing GUID) —
--- the model stays hidden then. All model calls are pcall-guarded so a model API
--- mismatch can never error the report.
-local function SetCreatureModel(model, guid)
-    if not model then return end
+-- Render the SOURCE's STOCK 2D portrait — the flat unit-frame face WoW uses — onto
+-- `tex2D`, resolved from the recap event's sourceGUID (`Creature-0-…-ID-spawn`). There
+-- is no GUID→2D-portrait call, so we use a hidden `model` purely to resolve the
+-- creature's displayID (`SetCreature` → `GetDisplayInfo` once it loads), then
+-- `SetPortraitTextureFromCreatureDisplayID`. On no creatureID / failure, `tex2D` hides
+-- and the spell/env icon underneath shows (which is what Blizzard's own recap shows).
+-- Everything is pcall-guarded so a model/API quirk can never error the report.
+local function SetCreaturePortrait(tex2D, model, guid)
+    if not (tex2D and model) then return end
     local npcID
     if type(guid) == "string" then
         local unitType, _, _, _, _, id = strsplit("-", guid)
-        if (unitType == "Creature" or unitType == "Vehicle") and id then
-            npcID = tonumber(id)
+        if (unitType == "Creature" or unitType == "Vehicle") and id then npcID = tonumber(id) end
+    end
+    tex2D:Hide()
+    if not npcID then model:SetScript("OnModelLoaded", nil); model:Hide(); return end
+
+    local function apply()
+        local okd, displayID = pcall(function() return model:GetDisplayInfo() end)
+        if okd and type(displayID) == "number" and displayID > 0
+           and SetPortraitTextureFromCreatureDisplayID then
+            if pcall(SetPortraitTextureFromCreatureDisplayID, tex2D, displayID) then
+                tex2D:SetTexCoord(0, 1, 0, 1)
+                tex2D:Show()
+            end
         end
     end
-    if not npcID then model:Hide(); return end
-    local ok = pcall(function()
-        model:ClearModel()
-        model:SetCreature(npcID)
-        model:SetPortraitZoom(0.9)
-        model:SetCamDistanceScale(1.0)
-        -- Freeze to a STATIC portrait (no idle animation — we just want the face).
-        if model.FreezeAnimation then model:FreezeAnimation(0, 0, 0)
-        elseif model.SetAnimation then model:SetAnimation(0, 0) end
-    end)
-    if ok then model:Show() else model:Hide() end
+
+    model:SetScript("OnModelLoaded", apply)
+    model:SetAlpha(0); model:Show()                       -- invisible resolver; shown so it loads
+    pcall(function() model:ClearModel(); model:SetCreature(npcID) end)
+    apply()                                               -- in case the display is already cached
+    if C_Timer and C_Timer.After then C_Timer.After(0.15, apply) end
 end
 
 local function RenderBanner(report)
     local kb = report.killingBlow
     if not kb then
         F.bannerIcon:Hide()
-        SetCreatureModel(F.bannerSourceModel, nil)
+        SetCreaturePortrait(F.bannerPortrait, F.bannerSourceModel, nil)
         F.bannerSpellBtn.spellID = nil
         F.bannerKilledBy:SetText(ColorOf(BDR.UI.DAMAGE) .. L.KILLED_BY .. "|r")
-        F.bannerSource:SetText("|cff999999" .. L.BANNER_UNKNOWN .. "|r")
+        F.bannerSource:SetText(ColorOf(BDR.UI.TEXT) .. L.BANNER_UNKNOWN .. "|r")
         F.bannerAmount:SetText("")
         F.bannerOver:SetText("")
         return
     end
-    -- The "KILLED BY" icon shows the SOURCE, not the spell: environmental → its
-    -- stock icon; a creature → its portrait (model over the icon); the spell icon
-    -- shows underneath as a fallback when no creature portrait is available.
+    -- The "KILLED BY" icon shows the SOURCE: environmental → its stock icon; a creature
+    -- → its STOCK 2D portrait (over the icon); the spell icon shows underneath as a
+    -- fallback when no creature portrait can be resolved.
     if kb.isEnv then
         F.bannerIcon:SetTexture(kb.iconOverride or "Interface\\Icons\\Ability_Creature_Cursed_05")
-        SetCreatureModel(F.bannerSourceModel, nil)
+        SetCreaturePortrait(F.bannerPortrait, F.bannerSourceModel, nil)
     else
         F.bannerIcon:SetTexture(SpellIcon(kb.spellID) or "Interface\\Icons\\Ability_Creature_Cursed_05")
-        SetCreatureModel(F.bannerSourceModel, kb.sourceGUID)  -- source portrait over the icon
+        SetCreaturePortrait(F.bannerPortrait, F.bannerSourceModel, kb.sourceGUID)
     end
     F.bannerIcon:Show()
     F.bannerSpellBtn.spellID = kb.spellID              -- drives the spell tooltip on hover
@@ -1116,9 +1158,9 @@ local function RenderBanner(report)
     -- overkill beneath — not the whole-window total. Signed (minus) like the table.
     F.bannerAmount:SetText(ColorOf(BDR.UI.DAMAGE) .. "-" .. FormatFull(kb.amount or 0) .. "|r")
     if kb.isInstaKill then
-        F.bannerOver:SetText("|cff888888" .. L.INSTANT_KILL .. "|r")
+        F.bannerOver:SetText(ColorOf(BDR.UI.TEXT) .. L.INSTANT_KILL .. "|r")
     elseif kb.overkill then
-        F.bannerOver:SetText("|cff888888" .. L.OVERKILL:format(FormatAmount(kb.overkill)) .. "|r")
+        F.bannerOver:SetText(ColorOf(BDR.UI.TEXT) .. L.OVERKILL:format(FormatAmount(kb.overkill)) .. "|r")
     else
         F.bannerOver:SetText("")
     end
@@ -1187,6 +1229,7 @@ function RenderGraph(report)   -- assigns the forward-declared upvalue (see Grap
     PoolReset(F.tailPool)
     PoolReset(F.xtickPool)
     HideCrosshair(); F.markerGlow:Hide(); F.deathMarker:Hide()
+    if F.hoverDot then F.hoverDot:Hide() end
     F.markerPos = {}
     F.trackRow = nil
     F.tracking = false
@@ -1226,8 +1269,8 @@ function RenderGraph(report)   -- assigns the forward-declared upvalue (see Grap
 
     local function X(t)   return (t - xMinT) / span * gw end
     local function Y(pct)
-        pct = math.max(Y_AXIS_MIN, math.min(100, pct))
-        return (pct - Y_AXIS_MIN) / (100 - Y_AXIS_MIN) * gh
+        pct = math.max(Y_AXIS_MIN, math.min(Y_AXIS_MAX, pct))
+        return (pct - Y_AXIS_MIN) / (Y_AXIS_MAX - Y_AXIS_MIN) * gh
     end
 
     -- X axis: seconds-BEFORE-death labels within the VISIBLE range (finer ticks when
@@ -1305,12 +1348,12 @@ function RenderGraph(report)   -- assigns the forward-declared upvalue (see Grap
         if ev.t >= visMin - 0.001 and ev.t <= visMax + 0.001 then
             local gx, gy = X(ev.t), Y(ev.hpPct or StepPctAt(curve, ev.t))   -- HP when it landed
             local color = (ev.kind == "heal") and BDR.UI.HEAL or (SchoolInfo(ev.school))
-            local r = ev.isKillingBlow and 7 or 5   -- dot radius (KB emphasised)
+            local r = ev.isKillingBlow and 5 or 4   -- small dot radius (KB emphasised)
             local d = PoolNext(F.dotPool, graph)
             d:SetSize(r * 2, r * 2)
             d:ClearAllPoints()
             d:SetPoint("CENTER", graph, "BOTTOMLEFT", gx, gy)
-            d.fill:SetColorTexture(color[1], color[2], color[3], 1)
+            d.fill:SetVertexColor(color[1], color[2], color[3], 1)   -- masked texture → tint, not SetColorTexture
             F.markerPos[ev] = { x = gx, y = gy, r = r * 2 }
         end
     end
@@ -1592,8 +1635,8 @@ local function RenderSources(report, yTop)
 
         local icon = s.iconOverride or SpellIcon(s.spellID)
         if icon then row.icon:SetTexture(icon); row.icon:Show() else row.icon:Hide() end
-        -- Source portrait over the icon (env sources keep their stock icon, no model).
-        SetCreatureModel(row.portrait, (not s.iconOverride) and s.sourceGUID or nil)
+        -- Stock 2D portrait over the icon (env sources keep their stock icon, no portrait).
+        SetCreaturePortrait(row.portrait2D, row.portrait, (not s.iconOverride) and s.sourceGUID or nil)
         row.name:SetText(s.name or L.UNKNOWN)
         row.name:SetTextColor(unpack(BDR.UI.TEXT))
         row.amount:SetText(FormatFull(s.total))     -- raw damage total (no percentage)
@@ -1646,7 +1689,7 @@ end
 -- ── public API ───────────────────────────────────────────────────────────────
 
 local function ResolveLayout()
-    local yBanner   = -PAD - TITLE_H
+    local yBanner   = -1 - TITLE_H   -- flush under the header (matches BuildFrame)
     local yGraphHdr = yBanner - BANNER_H - HDR_GAP
     local yCanvas   = yGraphHdr - GRAPH_HDR
     -- graph (GRAPH_H) → x-axis (XAXIS_H) → 8px gap → overview strip (OVERVIEW_H) → 12px

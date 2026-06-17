@@ -241,11 +241,17 @@ It is `UIPanelButtonTemplate` **soft-skinned via ElvUI** (`E:GetModule("Skins"):
 HandleButton`, pcall-guarded, once per button) — ElvUI doesn't auto-skin a custom
 addon button, so without this it kept the classic look beside a themed dialog.
 `Anchor` parents it to the StaticPopup, sizes/levels it to match the Recap button,
-sits it in the button row, then **`ExtendDialog` grows the popup's width** so our
-button is contained inside the dialog instead of floating off the right edge
-(best-effort + guarded; converges across the OnDeath re-anchor retries). Because
-StaticPopups are **recycled for other prompts**, the original width is tracked and
-**restored on `OnAlive`** (and in `Anchor`'s no-dialog fallback).
+and sits it in the button row. To contain it, **`ExtendDialog` grows the dialog**:
+StaticPopups are **TOP-anchored** so a plain `SetWidth` grows them *symmetrically* —
+the button (anchored within the dialog) moves out with it and the gap never closes.
+So we **pin the dialog's left edge once** (re-anchor its `TOPLEFT` to its current
+screen position), after which growth is purely **rightward**, and a throttled
+**`OnUpdate` on the button re-applies `EnforceDialogWidth`** every 0.1s — because the
+release countdown re-sizes the dialog as its text ticks, which would otherwise snap
+the width back and re-expose the button (a sanity cap stops runaway growth if the pin
+is ever lost). Because StaticPopups are **recycled for other prompts**, the original
+width **and anchor points** are tracked and **restored on `OnAlive`** (and in
+`Anchor`'s no-dialog fallback).
 
 ---
 
@@ -288,12 +294,17 @@ Sections top→bottom:
    directly to `headerBg`** (RIGHT −36, NOT chained off the close button) and the close
    button's anchor is **re-asserted after ElvUI skinning** — so a skin re-anchoring the
    close button can no longer drag the slider/label off-centre.
-2. **Death summary banner** — dark-red bar: 32px **SOURCE** icon with a dark-outer +
-   red-inner outline and left padding — environmental → its stock icon, a creature →
-   its **STATIC portrait** (`bannerSourceModel`, a `PlayerModel` over the icon,
-   `FreezeAnimation`'d so it's a frozen face not an animated 3D; pcall-guarded
-   `SetCreature` from the `kb.sourceGUID` creatureID), else the spell icon as a
-   fallback. **Two blocks**: left = `KILLED BY` (red, banner top) over `<killer>(WoW
+2. **Death summary banner** — dark-red bar **flush under the header and to the left/
+   right borders** (anchored at offset 1/−1 + `yBanner = −1 − TITLE_H`, no `PAD` gap, so
+   it spans edge-to-edge directly below the title bar). **40px** (enlarged) **SOURCE**
+   icon with a dark-outer + red-inner outline and left padding — environmental → its
+   stock icon, a creature → its **STOCK 2D unit-frame portrait** (`f.bannerPortrait`, a
+   flat texture via `SetPortraitTextureFromCreatureDisplayID`, NOT a 3D model). The
+   displayID is resolved by `SetCreaturePortrait`: an **invisible (alpha-0) `PlayerModel`
+   resolver** (`bannerSourceModel`) does `SetCreature(creatureID)` then `GetDisplayInfo()`
+   on `OnModelLoaded`; on no creatureID/failure the texture hides and the **spell/env icon
+   shows underneath** (which is what Blizzard's own recap shows). **Two blocks**: left =
+   `KILLED BY` (red, banner top) over `<killer>(WoW
    yellow `NAME_YELLOW`) • <spell>(text)`; right = the **killing blow's own damage**
    `(red, large, signed with a leading −)` over its `(Xk overkill)(gray)` — NOT the
    window total. `KILLED BY` and the Damage number are **top-anchored**; the **killer•
@@ -305,7 +316,7 @@ Sections top→bottom:
    OVER the 2D amount/overkill text and hid it.)
 3. **Health-timeline graph (hero) — the selling point.** X axis = **seconds
    BEFORE death** (`… -4s -2s`, with `DEATH` red at the death point `X(0)`);
-   `GRAPH_PAD` (0.1s) of breathing room is added **before the first hit AND after
+   `GRAPH_PAD` (**0.2s**) of breathing room is added **before the first hit AND after
    death** so neither end is flush to an edge; **both margins show a dashed fading
    line** (`tailPool`) — at HP=0 after death, and at the first sample's HP level
    before combat. **Mouse-wheel over the graph ZOOMS** the time window in/out around
@@ -323,10 +334,12 @@ Sections top→bottom:
    tombstone live on `f` (not `graph`) to dodge the clip. X-tick labels adapt to the
    visible span (down to 0.25s when zoomed in) via `xtickPool`; times render to
    **3 decimals** (`%.3fs`) everywhere (table, graph tooltip, row tip). Y axis = HP%,
-   mapped into `[Y_AXIS_MIN(-5%)..100]`
-   so the death line isn't flush at the bottom; **0/25/50/75/100% labels only — NO
-   gridlines** (and **no area fill, no legend, no minor ticks**: "keep only the
-   line"). **Stepped** HP line — HP holds flat between hits and drops **vertically**
+   mapped into `[Y_AXIS_MIN(-5%)..Y_AXIS_MAX(105%)]` so 0% sits a touch above the
+   bottom and 100% a touch below the top (headroom for the line). **NO Y-axis labels**
+   (the old 0/25/50/75/100% were removed — `GUTTER` is now **0**, so the graph + the
+   overview strip reclaim that left margin and run full width) and **no gridlines, no
+   area fill, no legend, no minor ticks**: "keep only the
+   line". **Stepped** HP line — HP holds flat between hits and drops **vertically**
    on a hit (a diagonal would falsely imply HP bleeding down gradually). **Gradient
    `HpColor`** green→amber(30–50%)→red. Markers + cursor tooltip read the line via
    `StepPctAt` (stepped); HP% is **rounded to nearest** (NOT ceil — the "1% above to
@@ -336,41 +349,46 @@ Sections top→bottom:
    `tt=0` x-tick is skipped; it uses the **`poi-graveyard-neutral` atlas** (a
    tombstone, reliably present) and falls back to the `BDR.DEATH_ICON` texture. (The
    literal `inv_misc_coffin_01` texture rendered blank in the client, hence the atlas.)
-   **Event markers = a school-coloured DOT per hit** (`dotPool`: a solid `fill` inside
-   a thin dark `border` ring, heals green; radius 5, **KB 7**). NOT spell icons — dots
-   were reverted to for a cleaner, consistent timeline (the icons-on-line read as
-   clutter). `F.markerPos[ev]` records each. Time mapping lives in `F.mapT`
+   **Event markers = a small school-coloured ROUND dot per hit** (`dotPool`: a `fill`
+   inside a thin dark `border` ring, heals green; radius **4**, KB **5**). The round
+   shape is a **real circular texture** (`DOT_TEX` = `Interface\COMMON\Indicator-Gray`)
+   tinted with `SetVertexColor` — **NOT `SetMask`**: masking a WHITE8x8 didn't render on
+   the live client and left the **"yellow squares"** (looked like unrendered assets), so
+   we use an actual filled-circle asset. Small so they don't overlap the line.
+   `F.markerPos[ev]` records each. Time mapping lives in `F.mapT`
    (`xMinT`/`span`/`fullMin`/`fullMax`), used by `GraphX` + `GraphTrack`.
    - **Continuous cursor tooltip** (`GraphTrack` on `graphOverlay`'s `OnUpdate`):
      a transparent overlay maps the cursor X → time, finds the nearest hit by X, and
-     shows a `GameTooltip` (`ANCHOR_CURSOR_RIGHT`) that follows the cursor with no dead
-     zones. **Minimal line** (default **yellow**): `%.3f sec before death at NN% health.`
-     (`TIP_BEFORE_DEATH`) — or, on the killing blow, `Killing blow at NN% health.`
-     (`TIP_KB_AT`). NOT "seconds into combat" (that was wrong/removed). **On a dot** it
-     expands with an `|T icon|t Spell Name` line then `Source:` / `School:` / `Hit:`
+     shows a `GameTooltip` **pinned to the graph's TOP edge at the cursor's X**
+     (`ANCHOR_NONE` + `SetPoint("BOTTOM{LEFT,RIGHT}", graph, "TOPLEFT", gx, 6)`, side
+     chosen by which half the cursor is in) — it follows the line horizontally instead
+     of floating with the cursor (like the table's row tooltip). **Minimal line**
+     (default **yellow**): `%.3f sec before death at NN% health.` (`TIP_BEFORE_DEATH`) —
+     or, on the killing blow, `Killing blow at NN% health.` (`TIP_KB_AT`). **On a dot**
+     it expands with an `|T icon|t Spell Name` line then `Source:` / `School:` / `Hit:`
      (signed) / `Hit %:` (its `% Max HP` delta) double-lines. The displayed HP/time use
      the **hit's own** `hpPct`/`t` (so the KB reads its real ~2%, not 0% at death). It
-     also drives the scrubber line + marker glow + table-row sync.
+     also drives the crosshair + hover dot + marker glow + table-row sync.
    - **Dotted vertical cursor crosshair** (`ShowCrosshair`/`HideCrosshair` over
      `f.crosshairPool`): a column of short dashes at the cursor X (a solid texture can't
      be dashed, so it's pooled dashes — same trick as `tailPool`), redrawn each hover
-     frame. Shown by both `GraphTrack` and the table-row hover sync.
+     frame, **plus a small `f.hoverDot`** (round, `DOT_TEX`) that rides the HP line where
+     the crosshair meets it (the value point under the cursor). Shown by both `GraphTrack`
+     and the table-row hover sync.
    - **Table→graph sync**: `HoverEvent`/`UnhoverEvent` (table-row hover) light the
      crosshair + marker glow via `GraphX`/`F.markerPos`.
    - **Overview / zoom-scroll strip** (`f.overview`, height `OVERVIEW_H`, between the
      x-axis and the table): a compressed stepped HP curve over the **full** extent
      (`f.ovLinePool`, red) with a draggable **brush** (`f.ovBrush`) over the visible
      `[zoomMin..zoomMax]` window and dimming (`ovDimL/ovDimR`) on the out-of-view sides.
-     **Drag the brush body to SCROLL (pan), drag an edge grip to ZOOM, or scroll-wheel
-     over the strip to ZOOM** (centred on the cursor, `ov:OnMouseWheel`); if the brush
-     ends up spanning everything, zoom clears (full view). The brush carries centred
-     **◄ ► move-handles** (`ovArrowL/ovArrowR`, atlas `common-icon-back/forwardarrow`
-     with a rotated-arrow fallback) shown only when it's wide enough. The drag modes
-     share `OverviewDrag`, run from an OnUpdate installed only while a drag is live (set
-     in `OverviewDragStart`, cleared in `OverviewDragStop`), re-rendering each frame so
-     the brush tracks the cursor. `RenderOverview` (called at the end of `RenderGraph`)
-     draws the strip + positions the brush, so it mirrors every wheel-zoom too. Hidden
-     when there's no curve.
+     **Drag the brush body to SCROLL (pan) only; ZOOM is the scroll-wheel** (over the
+     graph OR the strip, `ov:OnMouseWheel`, centred on the cursor). **No edge-resize
+     grips** — players kept resizing by accident when they meant to scroll. The brush
+     carries centred **◄ ► move-handles** (`ovArrowL/ovArrowR`) shown only when it's wide
+     enough. Pan runs through `OverviewDrag` from an OnUpdate installed only while a drag
+     is live (`OverviewDragStart`/`OverviewDragStop`). `RenderOverview` (end of
+     `RenderGraph`) draws the strip + positions the brush, so it mirrors every wheel-zoom.
+     Hidden when there's no curve.
 4. **Combat event table** — scrollable `UIPanelScrollFrameTemplate`,
    `TL_VISIBLE_ROWS` (**5**) tall (matches `SRC_VISIBLE_ROWS`), **newest first**,
    **damage-only** (heals are filtered out — they stay on the graph). A **borderless
@@ -406,12 +424,17 @@ Sections top→bottom:
    expands → the **meter list** appears and the `Total Damage` line drops below it (the
    full layout); clicking again re-collapses. Each meter row (`srcScroll`,
    `SRC_VISIBLE_ROWS` 5): one **FAT bar covering the whole row** (width ∝ share of total)
-   with the **source PORTRAIT** (`row.portrait`, a frozen `PlayerModel` from the source's
-   GUID, env/spell icon underneath) · name · raw total ON TOP (no per-row %), sorted
-   desc, primary brightest.
+   with the **source PORTRAIT** (`row.portrait2D`, the stock 2D unit-frame portrait via
+   the same `SetCreaturePortrait` resolver; env/spell icon underneath) · name · raw total
+   ON TOP (no per-row %), sorted desc, primary brightest.
 6. **Footer** — preceded by a **divider**; `DIFFICULTY • ZONE • NS WINDOW`
-   (uppercase, **gray**) + `/bdr` hint. **Half-height** (`FOOTER_H` 10) with the text
+   (uppercase) + `/bdr` hint. **Half-height** (`FOOTER_H` 10) with the text
    **vertically centred** in the band.
+
+> **Text colour:** `BDR.UI.TEXT_DIM` is now **white** (== `TEXT`, was gray) — all the
+> window's "dim" text (section headers, footer, x-ticks, table headers, source names)
+> and the banner's overkill/instant-kill/unknown lines render white. (Hover-tooltip
+> label greys `0.7,0.7,0.7` are left as-is — a separate surface.)
 
 The Analyzer puts **heals** in `report.hits` (with `kind`) so the graph can show
 HP rising; the table filters them out. Each source carries a representative

@@ -81,6 +81,7 @@ EXCLUDES=(
     '.git'
     '.github'
     '.idea'
+    '.claude'
     'docs'
     'dist'
     'CLAUDE.md'
@@ -146,8 +147,32 @@ fi
 # ---------------------------------------------------------------------------
 ZIPFILE="${VERSION}.zip"
 
+# Zip the staged folder with whatever archiver is available. Git Bash on Windows
+# usually has no `zip`, so fall back to 7-Zip / PowerShell / Python. All produce an
+# archive whose top-level entry is BetterDeathRecap/. Run from inside dist/.
+make_zip() {
+    local out="$1"
+    rm -f "$out"
+    if command -v zip >/dev/null 2>&1; then
+        zip -qr "$out" BetterDeathRecap/
+    elif command -v 7z >/dev/null 2>&1; then
+        7z a -tzip "$out" BetterDeathRecap/ >/dev/null
+    elif command -v powershell.exe >/dev/null 2>&1; then
+        powershell.exe -NoProfile -NonInteractive -Command \
+            "Compress-Archive -Path 'BetterDeathRecap' -DestinationPath '$out' -Force"
+    elif command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+        "$(command -v python3 || command -v python)" -c \
+            "import os,sys,zipfile; z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED); [z.write(os.path.join(r,f),os.path.join(r,f)) for r,_,fs in os.walk('BetterDeathRecap') for f in fs]; z.close()" \
+            "$out"
+    else
+        echo "ERROR: no archiver found (need zip, 7z, PowerShell, or Python)." >&2
+        echo "       The staged addon is ready at: $DIST/BetterDeathRecap/" >&2
+        return 1
+    fi
+}
+
 cd "$DIST"
-zip -r "$ZIPFILE" BetterDeathRecap/
+make_zip "$ZIPFILE"
 cd ..
 
 echo ""

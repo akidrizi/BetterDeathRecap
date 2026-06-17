@@ -36,6 +36,9 @@ globals = {
     "GetSpellTexture",
     "GetSpellInfo",
 
+    -- Stock 2D unit-frame portrait for the killer (from the creature's displayID)
+    "SetPortraitTextureFromCreatureDisplayID",
+
     -- Texture / atlas helpers (scrollbar restyle)
     "C_Texture",
 

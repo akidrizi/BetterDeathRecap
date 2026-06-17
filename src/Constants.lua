@@ -34,7 +34,7 @@ BDR.UI = {
     GOLD        = { 0.784, 0.635, 0.353, 1.00 },  -- gold accent: hover/selection wash + marker glow
     BORDER_GRAY = { 0.420, 0.420, 0.450, 1.00 },  -- frame edge + header divider (gray)
     TEXT        = { 0.941, 0.902, 0.824, 1.00 },  -- primary text  (#F0E6D2)
-    TEXT_DIM    = { 0.659, 0.639, 0.604, 1.00 },  -- secondary text / section headers (gray)
+    TEXT_DIM    = { 0.941, 0.902, 0.824, 1.00 },  -- secondary text — now WHITE (was gray; matches TEXT)
     NAME_YELLOW = { 1.000, 0.820, 0.000, 1.00 },  -- WoW unit-name yellow (killer name)
     DIVIDER     = { 0.231, 0.216, 0.196, 1.00 },  -- thin section divider lines
 
